@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "catalog-remote",
+  "description": "Allows pages loaded in the dedicated browser view to report navigation state to the desktop shell. The shell never trusts the page-provided URL; the address bar uses the native webview URL.",
+  "webviews": ["catalog"],
+  "remote": {
+    "urls": [
+      "https://**",
+      "http://**"
+    ]
+  },
+  "permissions": ["allow-report-catalog-state"]
+}

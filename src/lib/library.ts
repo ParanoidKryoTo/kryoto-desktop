@@ -1,0 +1,237 @@
+import { call, on } from '@/lib/bridge'
+
+/**
+ * The Library: games on this PC and how each one starts.
+ *
+ * Mirrors `src-tauri/src/library.rs`. What a Play press actually runs is
+ * decided in Rust (`launch.rs`); this side picks, shows and saves.
+ */
+
+export type LaunchEntry = {
+  executable: string
+  arguments: string
+  workingdir: string
+  description: string
+  oslist: string
+  /** Steam's kind: "default", "vr", "config"... */
+  type?: string
+}
+
+export type LibraryGame = {
+  id: string
+  title: string
+  slug: string | null
+  cover: string | null
+  hero: string | null
+  installDir: string
+  executable: string
+  defaultArgs: string
+  entries: LaunchEntry[]
+  source: string | null
+  preferredEntry: number | null
+  launchOptions: string
+  compatTool: string | null
+  applyOverrides: boolean
+  playtimeSeconds: number
+  lastPlayed: number | null
+  addedAt: number
+  version: string | null
+  short: string | null
+  developer: string | null
+  /** kryo.to marks it an adult game; its art is blurred unless Settings says otherwise. */
+  nsfw: boolean
+}
+
+export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null }
+
+export const BLANK_GAME: LibraryGame = {
+  id: '',
+  title: '',
+  slug: null,
+  cover: null,
+  hero: null,
+  installDir: '',
+  executable: '',
+  defaultArgs: '',
+  entries: [],
+  source: null,
+  preferredEntry: null,
+  launchOptions: '',
+  compatTool: null,
+  applyOverrides: true,
+  playtimeSeconds: 0,
+  lastPlayed: null,
+  addedAt: 0,
+  version: null,
+  short: null,
+  developer: null,
+  nsfw: false,
+}
+
+export const library = {
+  list: () => call<LibraryGame[]>('library_list'),
+  add: (exePath: string, game: Partial<LibraryGame>) =>
+    call<LibraryGame>('library_add', { exePath, game: { ...BLANK_GAME, ...game } }),
+  save: (game: LibraryGame) => call<LibraryGame>('library_save', { game }),
+  remove: (id: string, deleteFiles: boolean) => call<boolean>('library_remove', { id, deleteFiles }),
+  launch: (id: string, entry: number | null) => call<void>('game_launch', { id, entry }),
+  preview: (game: LibraryGame, entry: number | null) => call<string>('game_launch_preview', { game, entry }),
+  running: () => call<string[]>('game_running'),
+  stop: (id: string) => call<void>('game_stop', { id }),
+  diskSize: (installDir: string) => call<number>('game_disk_size', { installDir }),
+  openFolder: (path: string) => call<void>('open_folder', { path }),
+  onState: (fn: (e: GameStateEvent) => void) => on<GameStateEvent>('game-state', fn),
+  onChanged: (fn: () => void) => on<unknown>('library-changed', fn),
+}
+
+/* ── kryo.to ─────────────────────────────────────────────── */
+
+export type CatalogGame = {
+  slug: string
+  title: string
+  cover: string | null
+  hero: string | null
+  executable: string
+  defaultArgs: string
+  entries: LaunchEntry[]
+  source: string | null
+  version: string | null
+  short: string | null
+  developer: string | null
+  nsfw: boolean
+}
+
+/** A kryo.to game page link or a bare slug, as a slug. */
+export function slugFrom(input: string): string | null {
+  const text = input.trim()
+  if (!text) return null
+  const fromUrl = text.match(/kryo\.to\/game\/([a-z0-9-]+)/i)
+  if (fromUrl?.[1]) return fromUrl[1].toLowerCase()
+  return /^[a-z0-9-]+$/i.test(text) ? text.toLowerCase() : null
+}
+
+/**
+ * A release's facts from kryo.to's public game API: Steam's launch entries,
+ * the exe and arguments staff picked, art, version, and the source label
+ * (which says whether Wine needs DLL overrides).
+ */
+export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
+  const res = await fetch(`https://kryo.to/api/games/${encodeURIComponent(slug)}`)
+  if (res.status === 404) throw new Error(`kryo.to has no game at /game/${slug}.`)
+  if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
+  const { game } = (await res.json()) as { game: Record<string, unknown> }
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+  const available = (game.game_launch_options as { available?: LaunchEntry[] } | null)?.available
+  const appid = str(game.steam_appid)
+  return {
+    slug,
+    title: str(game.title) ?? slug,
+    cover: str(game.cover_vertical) ?? str(game.cover),
+    hero:
+      str(game.hero_image_override) ??
+      (appid ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}/library_hero.jpg` : str(game.cover_horizontal)),
+    executable: str(game.game_executable_path) ?? '',
+    defaultArgs: str(game.game_executable_args) ?? '',
+    entries: Array.isArray(available) ? available.filter(isWindowsEntry) : [],
+    source: str(game.source),
+    version: str(game.version),
+    short: str(game.short),
+    developer: str(game.developer),
+    nsfw: game.nsfw === true,
+  }
+}
+
+/** Steam's logo art for the game page, from the hero URL's app id. */
+export function logoFor(game: LibraryGame): string | null {
+  const m = (game.hero ?? game.cover ?? '').match(/\/apps\/(\d+)\//)
+  return m ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${m[1]}/logo.png` : null
+}
+
+/** Steam's landscape capsule, for the recent-games shelf. */
+export function capsuleFor(game: LibraryGame): string | null {
+  const m = (game.hero ?? game.cover ?? '').match(/\/apps\/(\d+)\//)
+  return m ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${m[1]}/header.jpg` : game.cover
+}
+
+/* ── Launch entries ──────────────────────────────────────── */
+
+const TYPE_LABELS: Record<string, string> = {
+  vr: 'Play in VR',
+  safemode: 'Safe mode',
+  config: 'Configure',
+  editor: 'Editor',
+  server: 'Dedicated server',
+  manual: 'Manual',
+  option1: 'Alternative launch 1',
+  option2: 'Alternative launch 2',
+  option3: 'Alternative launch 3',
+}
+
+export function isWindowsEntry(e: LaunchEntry): boolean {
+  const os = (e.oslist ?? '').toLowerCase()
+  return !!e.executable && (!os || os.includes('windows'))
+}
+
+export function entryLabel(e: LaunchEntry): string {
+  return e.description?.trim() || TYPE_LABELS[(e.type ?? '').toLowerCase()] || 'Play'
+}
+
+export function entryIsVr(e: LaunchEntry): boolean {
+  return (e.type ?? '').toLowerCase() === 'vr' || /\bvr\b/i.test(entryLabel(e))
+}
+
+/** Whether Play has a question to ask: two ways in, or one needing a flag. */
+export function hasChoice(game: LibraryGame): boolean {
+  return game.entries.length > 1 || game.entries.some((e) => e.arguments.trim())
+}
+
+/** The entry the release is set up with on kryo.to, else Steam's first. */
+export function releaseDefaultEntry(game: LibraryGame): number | null {
+  if (game.entries.length === 0) return null
+  const exe = game.executable.replace(/\\/g, '/').toLowerCase()
+  const i = game.entries.findIndex(
+    (e) =>
+      e.executable.replace(/\\/g, '/').toLowerCase() === exe &&
+      e.arguments.trim() === game.defaultArgs.trim(),
+  )
+  return i >= 0 ? i : 0
+}
+
+/** What Play starts without asking, or `'ask'`. */
+export function playTarget(game: LibraryGame): number | null | 'ask' {
+  if (game.preferredEntry != null && game.entries[game.preferredEntry]) return game.preferredEntry
+  if (hasChoice(game)) return 'ask'
+  return game.entries.length === 1 ? 0 : null
+}
+
+/* ── Launch option presets (the Steam non-Steam-game guide) ── */
+
+export const PRESETS = [
+  {
+    id: 'kryoto-online',
+    label: 'Kryoto Online',
+    line: 'WINEDLLOVERRIDES="steam_api64=n,b;kryotoO=n,b;photon_universal=n,b" %command%',
+  },
+  {
+    id: 'online-fix',
+    label: 'Online-Fix',
+    line: 'WINEDLLOVERRIDES="OnlineFix64=n;SteamOverlay64=n;winmm=n,b;dnet=n;steam_api64=n" %command%',
+  },
+] as const
+
+/** Which preset a release's source label calls for, if any. */
+export function presetFor(source: string | null): (typeof PRESETS)[number] | null {
+  const s = (source ?? '').toLowerCase()
+  if (s.includes('kryoto online')) return PRESETS[0]
+  if (/online-?fix|\bofme\b/.test(s)) return PRESETS[1]
+  return null
+}
+
+/** The line for Steam's LAUNCH OPTIONS box, when played through Steam. */
+export function steamLine(game: LibraryGame, entry: number | null): string {
+  const args = entry != null ? (game.entries[entry]?.arguments ?? '') : game.defaultArgs
+  const preset = presetFor(game.source)
+  return [preset ? preset.line : '%command%', args.trim()].filter(Boolean).join(' ')
+}
+
+export const isWindowsHost = () => /Windows/i.test(navigator.userAgent)

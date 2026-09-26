@@ -1,0 +1,128 @@
+import { useEffect, useState } from 'react'
+import { call } from '@/lib/bridge'
+
+export type Palette = 'monochrome' | 'oled' | 'amber' | 'emerald' | 'nord' | 'sepia' | 'blossom'
+export type Radius = 'sharp' | 'soft' | 'rounded' | 'round' | 'pill'
+
+/** Mirrors `src-tauri/src/settings.rs`. */
+export type Settings = {
+  libraryDir: string
+  deleteArchives: boolean
+  startPage: 'store' | 'library'
+  defaultCompatTool: string | null
+  minimizeOnPlay: boolean
+  notifyDownloads: boolean
+  palette: Palette
+  radius: Radius
+  font: 'teletext' | 'mono'
+  showAdult: boolean
+  /** Take palette, corners, typeface and the adult blur from the kryo.to account. */
+  followAccount: boolean
+  /** Library folders besides `libraryDir` (where new games go). */
+  libraryFolders: string[]
+  sendReports: boolean
+  closeToTray: boolean
+  startWithSystem: boolean
+  /** Buttons press in under the pointer. */
+  pressEffect: boolean
+  /** Add play time to the kryo.to account. */
+  sharePlaytime: boolean
+}
+
+/** kryo.to's palettes, named as the site names them. */
+export const PALETTES: { id: Palette; label: string }[] = [
+  { id: 'monochrome', label: 'Monochrome' },
+  { id: 'oled', label: 'OLED' },
+  { id: 'amber', label: 'Amber CRT' },
+  { id: 'emerald', label: 'Emerald' },
+  { id: 'nord', label: 'Nordic Slate' },
+  { id: 'sepia', label: 'Sepia' },
+  { id: 'blossom', label: 'Blossom' },
+]
+
+export const RADII: { value: Radius; label: string }[] = [
+  { value: 'sharp', label: 'Sharp' },
+  { value: 'soft', label: 'Soft' },
+  { value: 'rounded', label: 'Rounded' },
+  { value: 'round', label: 'Round' },
+  { value: 'pill', label: 'Pill' },
+]
+
+export type Look = Pick<Settings, 'palette' | 'radius' | 'font' | 'showAdult'> & { pressEffect?: boolean }
+
+/** What a kryo.to account says about its look (`/api/auth/me`). */
+export type AccountAppearance = {
+  palette: string | null
+  radius: string | null
+  typeface: string | null
+  nsfwBlur: boolean
+}
+
+const PALETTE_IDS = new Set(PALETTES.map((p) => p.id as string))
+const RADIUS_IDS = new Set(RADII.map((r) => r.value as string))
+
+/**
+ * The look to draw in: the account's, when Settings follows it and the site
+ * has said, otherwise the client's own. The site's light theme is not carried
+ * over - the client is dark by design - but its palette, corners, typeface
+ * and adult blur are.
+ */
+export function effectiveLook(s: Settings, account: { appearance?: AccountAppearance | null } | null | undefined): Look {
+  const a = s.followAccount ? account?.appearance : null
+  if (!a) return { palette: s.palette, radius: s.radius, font: s.font, showAdult: s.showAdult, pressEffect: s.pressEffect }
+  return {
+    palette: (a.palette && PALETTE_IDS.has(a.palette) ? a.palette : 'monochrome') as Palette,
+    radius: (a.radius && RADIUS_IDS.has(a.radius) ? a.radius : 'pill') as Radius,
+    font: a.typeface === 'mono' ? 'mono' : 'teletext',
+    showAdult: !a.nsfwBlur,
+    pressEffect: s.pressEffect,
+  }
+}
+
+/** Stamp the look on <html>, the way kryo.to does before first paint. */
+export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { pressEffect?: boolean }) {
+  const html = document.documentElement
+  if (s.pressEffect === false) html.dataset.press = 'off'
+  else delete html.dataset.press
+  html.dataset.palette = s.palette || 'monochrome'
+  html.dataset.radius = s.radius || 'pill'
+  if (s.font === 'mono') html.dataset.font = 'mono'
+  else delete html.dataset.font
+}
+
+/* One copy of the settings for the whole window, so a save in Settings
+   reaches everything that reads them (the look, the Store's start page). */
+let cached: Settings | null = null
+const subscribers = new Set<(s: Settings) => void>()
+function publish(s: Settings) {
+  cached = s
+  subscribers.forEach((fn) => fn(s))
+}
+
+export const settingsApi = {
+  get: async () => {
+    const s = await call<Settings>('settings_get')
+    publish(s)
+    return s
+  },
+  save: async (settings: Settings) => {
+    const s = await call<Settings>('settings_save', { settings })
+    publish(s)
+    return s
+  },
+  /** Re-read after the native side changed them (Storage writes folders). */
+  reload: () => settingsApi.get(),
+}
+
+export function useSettings(): Settings | null {
+  const [s, setS] = useState<Settings | null>(cached)
+  useEffect(() => {
+    subscribers.add(setS)
+    if (!cached) void settingsApi.get().catch(() => {})
+    else setS(cached)
+    return () => {
+      subscribers.delete(setS)
+    }
+  }, [])
+  return s
+}

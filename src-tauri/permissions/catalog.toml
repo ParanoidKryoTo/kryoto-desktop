@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-report-catalog-state"
+description = "Allow the hosted catalog to report navigation state to the desktop shell."
+commands.allow = ["report_catalog_state"]

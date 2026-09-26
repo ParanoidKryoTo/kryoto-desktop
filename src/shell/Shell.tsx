@@ -1,0 +1,690 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import {
+  FolderOpen,
+  Globe,
+  LogOut,
+  Play,
+  Plus,
+  Settings as SettingsIcon,
+  Square,
+  Trash2,
+  User,
+} from 'lucide-react'
+import { Button, Check, ContextMenu, Label, Modal, type MenuEntry } from '@/ui'
+import { KryoMark } from '@/ui/ascii/KryoMark'
+import { AsciiArt } from '@/ui/ascii/AsciiArt'
+import { FriendsPage } from '@/friends/FriendsPage'
+import { CommunityPage } from '@/community/CommunityPage'
+import { TitleBar } from '@/shell/TitleBar'
+import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
+import { UrlPill, WebSlot } from '@/shell/WebView'
+import { BottomBar } from '@/shell/BottomBar'
+import { Toasts, useToasts, type Toast } from '@/shell/Toasts'
+import { Sidebar } from '@/library/Sidebar'
+import { LibraryHome } from '@/library/LibraryHome'
+import { GamePage } from '@/library/GamePage'
+import { LaunchChooser } from '@/library/LaunchChooser'
+import { GameProperties } from '@/library/GameProperties'
+import { AddGameDialog } from '@/library/AddGameDialog'
+import { DownloadsPage } from '@/downloads/DownloadsPage'
+import { isWebSection, SettingsPage, type SettingsSection } from '@/settings/SettingsPage'
+import { useLibrary } from '@/hooks/useLibrary'
+import type { Account } from '@/hooks/useAccount'
+import { useInbox } from '@/hooks/useInbox'
+import { setSavedStatus, useSaved } from '@/hooks/useSaved'
+import type { useBrowserPage } from '@/hooks/useBrowserPage'
+import { useDownloads } from '@/lib/downloads'
+import { useSettings } from '@/lib/settings'
+import { call, errorText, on } from '@/lib/bridge'
+import { logError } from '@/lib/log'
+import { entryIsVr, entryLabel, library, playTarget, type LibraryGame } from '@/lib/library'
+import { exitApp, isTauri, navigateCatalog, openExternal, setStoreVisible, signOut } from '@/lib/window'
+
+type View =
+  | { kind: 'web' }
+  | { kind: 'home' }
+  | { kind: 'game'; id: string }
+  | { kind: 'downloads' }
+  | { kind: 'friends' }
+  | { kind: 'community' }
+  | { kind: 'settings'; section: SettingsSection }
+type Browser = ReturnType<typeof useBrowserPage>
+
+type Overlay =
+  | { kind: 'add'; slug: string | null }
+  | { kind: 'choose'; id: string }
+  | { kind: 'props'; id: string }
+  | { kind: 'uninstall'; id: string }
+  | { kind: 'about' }
+
+const sameView = (a: View, b: View) =>
+  a.kind === b.kind &&
+  (a.kind !== 'game' || a.id === (b as { id: string }).id) &&
+  (a.kind !== 'settings' || a.section === (b as { section: SettingsSection }).section)
+
+/** Which top tab a kryo.to address lights, the way Steam lights its nav. */
+function tabForUrl(url: string): TopTab {
+  let path = '/'
+  try {
+    const u = new URL(url)
+    if (!/(^|\.)kryo\.to$/.test(u.hostname)) return 'store'
+    path = u.pathname
+  } catch {
+    return 'store'
+  }
+  if (/^\/(user|settings|account|notifications|library|login|signup|register)(\/|$)/.test(path)) return 'profile'
+  if (/^\/(blog|collections|requests|stats|discord|rolls)(\/|$)/.test(path)) return 'community'
+  return 'store'
+}
+
+function slugOnPage(url: string): string | null {
+  const m = url.match(/^https:\/\/kryo\.to\/game\/([a-z0-9-]+)/i)
+  return m?.[1] ? m[1].toLowerCase() : null
+}
+
+export function Shell({ startPage, account, browser }: { startPage: 'store' | 'library'; account: Account; browser: Browser }) {
+  const lib = useLibrary()
+  const { inbox, news } = useInbox()
+  const dl = useDownloads()
+  const saved = useSaved()
+  const { state: page, actions: web } = browser
+  const { toasts, push, dismiss } = useToasts()
+
+  /* ── History: the Library and the Store share the arrows ── */
+  const [history, setHistory] = useState<{ stack: View[]; index: number }>({
+    stack: [startPage === 'store' ? { kind: 'web' } : { kind: 'home' }],
+    index: 0,
+  })
+  const view: View = history.stack[history.index] ?? { kind: 'home' }
+  const go = useCallback((next: View) => {
+    setHistory((h) => {
+      const current = h.stack[h.index]
+      if (current && sameView(current, next)) return h
+      const stack = [...h.stack.slice(0, h.index + 1), next].slice(-50)
+      return { stack, index: stack.length - 1 }
+    })
+  }, [])
+  const openWeb = useCallback(
+    (path?: string) => {
+      go({ kind: 'web' })
+      if (path) void navigateCatalog(path).catch(() => {})
+    },
+    [go],
+  )
+  const canBack = (view.kind === 'web' && page.canGoBack) || history.index > 0
+  const canForward = (view.kind === 'web' && page.canGoForward) || history.index < history.stack.length - 1
+  // One pair of arrows for everything: inside the Store they step through its
+  // pages first, then back out into the Library - Steam's model. kryo.to
+  // hides its own back button inside the client, so there is only this pair.
+  const back = useCallback(() => {
+    if (view.kind === 'web' && page.canGoBack) web.back()
+    else setHistory((h) => ({ ...h, index: Math.max(0, h.index - 1) }))
+  }, [view.kind, page.canGoBack, web])
+  const forward = useCallback(() => {
+    if (view.kind === 'web' && page.canGoForward) web.forward()
+    else setHistory((h) => ({ ...h, index: Math.min(h.stack.length - 1, h.index + 1) }))
+  }, [view.kind, page.canGoForward, web])
+  // The mouse's side buttons and Alt+arrows, anywhere in the client's own
+  // chrome (inside the Store, the web view handles them itself).
+  useEffect(() => {
+    const onMouse = (e: MouseEvent) => {
+      if (e.button === 3) back()
+      else if (e.button === 4) forward()
+      else return
+      e.preventDefault()
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey) return
+      if (e.key === 'ArrowLeft') back()
+      else if (e.key === 'ArrowRight') forward()
+    }
+    window.addEventListener('mouseup', onMouse)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mouseup', onMouse)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [back, forward])
+
+  /* ── Overlays over the native web view ── */
+  const [overlay, setOverlay] = useState<Overlay | null>(null)
+  const [ctx, setCtx] = useState<{ game: LibraryGame; x: number; y: number } | null>(null)
+  // Menus open in their own window over the Store; only dialogs hide it.
+  const storeVisible =
+    (view.kind === 'web' || (view.kind === 'settings' && isWebSection(view.section))) && !overlay && !page.error
+  const openSettings = useCallback((section: SettingsSection = 'interface') => go({ kind: 'settings', section }), [go])
+  // Leaving Settings: the account may have changed its look or name there.
+  const wasSettings = useRef(false)
+  useEffect(() => {
+    if (wasSettings.current && view.kind !== 'settings') void call('store_refresh_account').catch(() => {})
+    wasSettings.current = view.kind === 'settings'
+  }, [view.kind])
+  useEffect(() => {
+    void setStoreVisible(storeVisible)
+  }, [storeVisible])
+
+  // F11, like every other full-screen app.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'F11' || !isTauri()) return
+      e.preventDefault()
+      const win = getCurrentWindow()
+      void win.isFullscreen().then((f) => win.setFullscreen(!f))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // The tray menu's shortcuts.
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on<string>('tray-go', (where) => {
+      if (where === 'store') openWeb('/')
+      else if (where === 'library') go({ kind: 'home' })
+      else if (where === 'downloads') go({ kind: 'downloads' })
+      else if (where === 'settings') openSettings()
+    }).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [go, openWeb, openSettings])
+
+  // A kryo.to game closing adds the session to the account's play time
+  // (Settings > Windows can turn that off).
+  const settings = useSettings()
+  const gamesRef = useRef(lib.games)
+  gamesRef.current = lib.games
+  const shareRef = useRef(true)
+  shareRef.current = settings?.sharePlaytime ?? true
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on<{ id: string; running: boolean; seconds: number | null }>('game-state', (e) => {
+      if (e.running || !e.seconds || e.seconds < 60 || !shareRef.current) return
+      const slug = gamesRef.current.find((g) => g.id === e.id)?.slug
+      if (!slug) return
+      const now = Math.floor(Date.now() / 1000)
+      const key = `${e.id.slice(0, 40)}-${now}`.replace(/[^a-zA-Z0-9-]/g, '-')
+      void call('store_report_play', { slug, startedAt: now - e.seconds, seconds: Math.min(e.seconds, 86_400), key }).catch((err) =>
+        logError('playtime', err),
+      )
+    }).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [])
+
+  // What the library reports as an error goes in the log too.
+  useEffect(() => {
+    if (lib.error) logError('library', lib.error)
+  }, [lib.error])
+
+  const gameById = (id: string) => lib.games.find((g) => g.id === id) ?? null
+
+  /* ── Playing ── */
+  const play = useCallback(
+    (game: LibraryGame, forceAsk = false) => {
+      const target = playTarget(game)
+      if (forceAsk || target === 'ask') setOverlay({ kind: 'choose', id: game.id })
+      else void lib.play(game.id, target)
+    },
+    [lib],
+  )
+  const playEntry = useCallback((game: LibraryGame, entry: number) => void lib.play(game.id, entry), [lib])
+
+  const manageMenu = (g: LibraryGame): MenuEntry[] => [
+    { label: 'Properties', icon: <SettingsIcon />, onSelect: () => setOverlay({ kind: 'props', id: g.id }) },
+    {
+      label: 'Browse local files',
+      icon: <FolderOpen />,
+      onSelect: () => void library.openFolder(g.installDir).catch((e) => lib.setError(errorText(e))),
+    },
+    ...(g.slug ? [{ label: 'Store page', icon: <Globe />, onSelect: () => openWeb(`/game/${g.slug}`) }] : []),
+    { separator: true },
+    { label: 'Uninstall', icon: <Trash2 />, danger: true, onSelect: () => setOverlay({ kind: 'uninstall', id: g.id }) },
+  ]
+  const gameMenu = (g: LibraryGame): MenuEntry[] => [
+    lib.running.has(g.id)
+      ? { label: 'Stop', icon: <Square />, onSelect: () => void lib.stop(g.id) }
+      : { label: 'Play', icon: <Play />, onSelect: () => play(g) },
+    ...(g.entries.length > 1 && !lib.running.has(g.id)
+      ? [
+          { heading: 'Play as' } as MenuEntry,
+          ...g.entries.map((e, i) => ({
+            label: `${entryLabel(e)}${entryIsVr(e) ? ' (VR)' : ''}`,
+            onSelect: () => playEntry(g, i),
+          })),
+        ]
+      : []),
+    { separator: true },
+    ...manageMenu(g),
+  ]
+
+  /* ── Menus ── */
+  const recent = useMemo(
+    () => lib.games.filter((g) => g.lastPlayed).sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0)).slice(0, 4),
+    [lib.games],
+  )
+  const titleMenus: { label: string; items: MenuEntry[] }[] = [
+    {
+      label: 'Kryoto',
+      items: [
+        { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings() },
+        { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
+        { separator: true },
+        { label: `Sign out ${account.username}`, icon: <LogOut />, onSelect: () => void signOut().catch(() => {}) },
+        { label: 'Exit Kryoto', onSelect: () => void exitApp() },
+      ],
+    },
+    {
+      label: 'View',
+      items: [
+        { label: 'Store', onSelect: () => openWeb('/') },
+        { label: 'Library', onSelect: () => go({ kind: 'home' }) },
+        { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
+        { label: 'Community', onSelect: () => openWeb('/blog') },
+        { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
+        { separator: true },
+        { label: 'Reload page', hint: 'Ctrl R', disabled: view.kind !== 'web', onSelect: () => web.reload() },
+        { label: 'Full screen', hint: 'F11', onSelect: () => void getCurrentWindow().setFullscreen(true).catch(() => {}) },
+      ],
+    },
+    {
+      label: 'Games',
+      items: [
+        { label: 'View games library', onSelect: () => go({ kind: 'home' }) },
+        { label: 'Add a game on this PC', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
+        ...(recent.length
+          ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: g.title, icon: <Play />, onSelect: () => play(g) }))]
+          : []),
+      ],
+    },
+    {
+      label: 'Help',
+      items: [
+        { label: 'Kryoto support', onSelect: () => openWeb('/support') },
+        { label: "What's new on kryo.to", onSelect: () => openWeb('/changelog') },
+        { label: 'Discord', onSelect: () => openWeb('/discord') },
+        { separator: true },
+        { label: 'About Kryoto Desktop', onSelect: () => setOverlay({ kind: 'about' }) },
+      ],
+    },
+  ]
+
+  const username = account.username
+  const tabs: NavTabSpec[] = [
+    {
+      id: 'store',
+      label: 'Store',
+      onOpen: () => openWeb(view.kind === 'web' && tabForUrl(page.url) === 'store' ? undefined : '/'),
+      items: [
+        { label: 'Home', onSelect: () => openWeb('/') },
+        { label: 'Browse', onSelect: () => openWeb('/browse') },
+        { label: 'Requests', onSelect: () => openWeb('/requests') },
+        { label: 'Stats', onSelect: () => openWeb('/stats') },
+      ],
+    },
+    {
+      id: 'library',
+      label: 'Library',
+      onOpen: () => go({ kind: 'home' }),
+      items: [
+        { label: 'Home', onSelect: () => go({ kind: 'home' }) },
+        { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
+        { label: 'Add a game', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
+      ],
+    },
+    {
+      id: 'community',
+      label: 'Community',
+      onOpen: () => go({ kind: 'community' }),
+      items: [
+        { label: 'Statistics', onSelect: () => go({ kind: 'community' }) },
+        { label: 'Blog', onSelect: () => openWeb('/blog') },
+        { label: 'Collections', onSelect: () => openWeb('/collections') },
+        { label: 'Requests', onSelect: () => openWeb('/requests') },
+        { label: 'Discord', onSelect: () => openWeb('/discord') },
+      ],
+    },
+    {
+      id: 'profile',
+      label: account.displayName || account.username,
+      onOpen: () => openWeb(`/user/${username}`),
+      items: [
+        { label: 'Profile', onSelect: () => openWeb(`/user/${username}`) },
+        { label: 'Saved games', onSelect: () => openWeb('/library') },
+        { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
+        { label: 'Notifications', onSelect: () => openWeb('/notifications') },
+        { label: 'Settings', onSelect: () => openSettings('profile') },
+      ],
+    },
+  ]
+  const currentTab: TopTab =
+    view.kind === 'web'
+      ? tabForUrl(page.url)
+      : view.kind === 'friends' || view.kind === 'settings'
+        ? 'profile'
+        : view.kind === 'community'
+          ? 'community'
+          : 'library'
+
+  const accountMenu: MenuEntry[] = [
+    { label: 'View profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },
+    { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings('profile') },
+    { separator: true },
+    { label: 'Sign out', icon: <LogOut />, onSelect: () => void signOut().catch(() => {}) },
+  ]
+
+  /* ── Store helpers ── */
+  const pageSlug = view.kind === 'web' ? slugOnPage(page.url) : null
+  const pageGame = pageSlug ? (lib.games.find((g) => g.slug === pageSlug) ?? null) : null
+  const addFromPage = pageSlug
+    ? () => (pageGame ? go({ kind: 'game', id: pageGame.id }) : setOverlay({ kind: 'add', slug: pageSlug }))
+    : null
+
+  // Downloads that start while the client is open (not the resumable leftovers
+  // it starts with) are news.
+  const known = useRef<Set<string> | null>(null)
+  useEffect(() => {
+    if (known.current === null) {
+      if (dl.length) known.current = new Set(dl.map((d) => d.id))
+      else window.setTimeout(() => (known.current ??= new Set()), 1500)
+      return
+    }
+    for (const d of dl) {
+      if (known.current.has(d.id)) continue
+      known.current.add(d.id)
+      push({ title: `Downloading ${d.meta.title}`, body: 'It installs itself when done. Open Downloads to watch it.', gameId: null })
+    }
+  }, [dl, push])
+
+  const openToast = (t: Toast) => (t.gameId ? go({ kind: 'game', id: t.gameId }) : go({ kind: 'downloads' }))
+  const openNotification = (url: string | null) => {
+    if (!url) return openWeb('/notifications')
+    if (url.startsWith('/')) return openWeb(url)
+    if (/^https:\/\/kryo\.to\//.test(url)) return openWeb(url.replace('https://kryo.to', ''))
+    void openExternal(url)
+  }
+
+  /* ── Library area ── */
+  const selectedId = view.kind === 'game' ? view.id : null
+  const selected = selectedId ? gameById(selectedId) : null
+
+  let content: React.ReactNode = null
+  if (view.kind === 'community') {
+    content = (
+      <div className="absolute inset-0 flex bg-background">
+        <CommunityPage games={lib.games} onGame={(slug) => openWeb(`/game/${slug}`)} onProfile={(u) => openWeb(`/user/${u}`)} />
+      </div>
+    )
+  } else if (view.kind === 'settings') {
+    content = (
+      <div className="absolute inset-0 flex bg-background">
+        <SettingsPage
+          section={view.section}
+          onSection={(section) => go({ kind: 'settings', section })}
+          account={account}
+          page={page}
+          onSignOut={() => void signOut().catch(() => {})}
+        />
+      </div>
+    )
+  } else if (view.kind === 'friends') {
+    content = (
+      <div className="absolute inset-0 flex bg-background">
+        <FriendsPage account={account} onProfile={() => openWeb(`/user/${username}`)} onDiscord={() => openWeb('/discord')} />
+      </div>
+    )
+  } else if (view.kind === 'downloads') {
+    content = (
+      <div className="absolute inset-0 flex bg-background">
+        <DownloadsPage list={dl} onOpenGame={(id) => go({ kind: 'game', id })} onStore={() => openWeb('/')} />
+      </div>
+    )
+  } else if (view.kind === 'home' || view.kind === 'game') {
+    content = (
+      <div className="absolute inset-0 flex bg-background">
+        <Sidebar
+          games={lib.games}
+          downloads={dl}
+          running={lib.running}
+          selectedId={selectedId}
+          homeActive={view.kind === 'home'}
+          onHome={() => go({ kind: 'home' })}
+          onSelect={(id) => go({ kind: 'game', id })}
+          onPlay={play}
+          onContext={(game, x, y) => setCtx({ game, x, y })}
+          onDownloads={() => go({ kind: 'downloads' })}
+          saved={saved}
+          onStorePage={(slug) => openWeb(`/game/${slug}`)}
+        />
+        {view.kind === 'game' && selected ? (
+          <GamePage
+            key={selected.id}
+            game={selected}
+            running={lib.running.has(selected.id)}
+            error={lib.error}
+            onDismissError={() => lib.setError(null)}
+            onPlay={() => play(selected)}
+            onPlayEntry={(i) => playEntry(selected, i)}
+            onStop={() => void lib.stop(selected.id)}
+            gearItems={manageMenu(selected)}
+            onStorePage={selected.slug ? () => openWeb(`/game/${selected.slug}`) : null}
+            onGetUpdate={() => openWeb(`/game/${selected.slug}?download=1`)}
+            savedStatus={selected.slug ? (saved.find((e) => e.slug === selected.slug)?.status ?? null) : null}
+            onSetStatus={(st) => selected.slug && void setSavedStatus(selected.slug, st).catch((e) => lib.setError(errorText(e)))}
+          />
+        ) : lib.loaded && lib.games.length === 0 ? (
+          <EmptyLibrary onStore={() => openWeb('/')} onAdd={() => setOverlay({ kind: 'add', slug: null })} />
+        ) : (
+          <LibraryHome
+            games={lib.games}
+            running={lib.running}
+            onOpen={(id) => go({ kind: 'game', id })}
+            onPlay={play}
+            onContext={(game, x, y) => setCtx({ game, x, y })}
+          />
+        )}
+      </div>
+    )
+  }
+
+  const overlayGame = overlay && 'id' in overlay ? gameById(overlay.id) : null
+
+  return (
+    <div className="flex h-full flex-col bg-background">
+      <TitleBar
+        account={account}
+        inbox={inbox}
+        news={news}
+        menus={titleMenus}
+        accountMenu={accountMenu}
+        onNews={() => openWeb('/changelog')}
+        onOpenNotification={openNotification}
+        onMarkRead={() => void call('store_mark_read').catch(() => {})}
+        onAllNotifications={() => openWeb('/notifications')}
+      />
+      <NavBar
+        current={currentTab}
+        tabs={tabs}
+        canBack={canBack}
+        canForward={canForward}
+        onBack={back}
+        onForward={forward}
+        right={
+          view.kind === 'web' ? (
+            <UrlPill page={page} actions={web} onLibrary={addFromPage} inLibrary={!!pageGame} />
+          ) : (
+            <Button variant="outline" size="sm" onClick={() => setOverlay({ kind: 'add', slug: null })}>
+              <Plus className="size-3" />
+              Add a game
+            </Button>
+          )
+        }
+      />
+      <main className="relative min-h-0 grow">
+        {/* Always mounted: the Store loads (and says who is signed in) even
+            when the client opens on the Library. */}
+        <div className="absolute inset-0" style={{ visibility: view.kind === 'web' ? 'visible' : 'hidden' }}>
+          <WebSlot page={page} onRetry={web.retry} />
+        </div>
+        {content}
+      </main>
+      <BottomBar
+        downloads={dl}
+        notice={view.kind === 'web' ? (toasts[toasts.length - 1] ?? null) : null}
+        onNotice={(t) => {
+          dismiss(t.key)
+          openToast(t)
+        }}
+        onAddGame={() => setOverlay({ kind: 'add', slug: pageSlug })}
+        onDownloads={() => go({ kind: 'downloads' })}
+        onFriends={() => go({ kind: 'friends' })}
+        friendsActive={view.kind === 'friends'}
+      />
+      {view.kind !== 'web' ? <Toasts toasts={toasts} onOpen={openToast} onDismiss={dismiss} /> : null}
+
+      {ctx ? <ContextMenu x={ctx.x} y={ctx.y} items={gameMenu(ctx.game)} onClose={() => setCtx(null)} /> : null}
+
+      {overlay?.kind === 'add' ? (
+        <AddGameDialog
+          initialSlug={overlay.slug}
+          onClose={() => setOverlay(null)}
+          onAdded={(game) => {
+            lib.upsert(game)
+            setOverlay(null)
+            go({ kind: 'game', id: game.id })
+            push({ title: `${game.title} added`, body: 'It is in your library, ready to play.', gameId: game.id })
+          }}
+        />
+      ) : null}
+      {overlay?.kind === 'choose' && overlayGame ? (
+        <LaunchChooser
+          game={overlayGame}
+          onClose={() => setOverlay(null)}
+          onPlay={(entry, remember) => {
+            setOverlay(null)
+            if (remember) {
+              void library
+                .save({ ...overlayGame, preferredEntry: entry })
+                .then(lib.upsert)
+                .catch((e) => lib.setError(errorText(e)))
+            }
+            playEntry(overlayGame, entry)
+          }}
+        />
+      ) : null}
+      {overlay?.kind === 'props' && overlayGame ? (
+        <GameProperties
+          game={overlayGame}
+          onClose={() => setOverlay(null)}
+          onSaved={(game) => {
+            lib.upsert(game)
+            setOverlay(null)
+          }}
+          onUninstall={() => setOverlay({ kind: 'uninstall', id: overlayGame.id })}
+        />
+      ) : null}
+      {overlay?.kind === 'uninstall' && overlayGame ? (
+        <UninstallDialog
+          game={overlayGame}
+          onClose={() => setOverlay(null)}
+          onDone={(deleted) => {
+            lib.drop(overlayGame.id)
+            setOverlay(null)
+            go({ kind: 'home' })
+            push({
+              title: `${overlayGame.title} ${deleted ? 'uninstalled' : 'removed'}`,
+              body: deleted ? 'Its files were deleted.' : 'Taken off your library. Its files are where they were.',
+              gameId: null,
+            })
+          }}
+        />
+      ) : null}
+      {overlay?.kind === 'about' ? (
+        <Modal title="About" onClose={() => setOverlay(null)}>
+          <div className="grid justify-items-center gap-4 py-2 text-center">
+            <KryoMark mode="reveal" className="h-16" />
+            <p className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">Kryoto Desktop {__APP_VERSION__}</p>
+            <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+              kryo.to as an app: the store, your games, and downloads that install themselves.
+            </p>
+          </div>
+        </Modal>
+      ) : null}
+    </div>
+  )
+}
+
+function EmptyLibrary({ onStore, onAdd }: { onStore: () => void; onAdd: () => void }) {
+  return (
+    <div className="grid grow place-content-center justify-items-center gap-4 text-center">
+      <AsciiArt
+        lines={['┌───────┐ ┌───────┐ ┌───────┐', '│ ░░░░░ │ │ ░░░░░ │ │ ░░░░░ │', '│ ░░░░░ │ │ ░░░░░ │ │ ░░░░░ │', '│       │ │       │ │       │', '└───────┘ └───────┘ └───────┘']}
+        mode="reveal"
+        className="h-16 text-muted-foreground"
+      />
+      <Label>Your library is empty</Label>
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
+        Download a game from the store and it installs itself here, ready to play. Games already on this PC can be added too.
+      </p>
+      <div className="flex gap-2">
+        <Button variant="primary" onClick={onStore}>
+          Browse the store
+        </Button>
+        <Button onClick={onAdd}>
+          <Plus className="size-3.5" />
+          Add a game
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function UninstallDialog({ game, onClose, onDone }: { game: LibraryGame; onClose: () => void; onDone: (deleted: boolean) => void }) {
+  const [deleteFiles, setDeleteFiles] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  return (
+    <Modal
+      title={`Uninstall ${game.title}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true)
+              library
+                .remove(game.id, deleteFiles)
+                .then(onDone)
+                .catch((e) => {
+                  setError(errorText(e))
+                  setBusy(false)
+                })
+            }}
+          >
+            <Trash2 className="size-3.5" />
+            {busy ? 'Uninstalling' : 'Uninstall'}
+          </Button>
+        </>
+      }
+    >
+      <Check checked={deleteFiles} onChange={setDeleteFiles} label="Delete the game's files" />
+      <p className="kryo-ascii-art select-text break-all text-[11px] text-muted-foreground">{game.installDir}</p>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Files are only deleted for games installed into your library folder. A game you added from somewhere else is only taken
+        off the list. Play time is forgotten either way.
+      </p>
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+    </Modal>
+  )
+}

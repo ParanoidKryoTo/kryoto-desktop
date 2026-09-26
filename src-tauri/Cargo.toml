@@ -1,0 +1,30 @@
+[package]
+name = "kryoto-desktop"
+version = "0.2.0"
+description = "Kryoto's native desktop launcher shell."
+authors = ["Kryoto"]
+edition = "2021"
+
+[lib]
+name = "kryoto_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable", "tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-dialog = "2"
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio = { version = "1", features = ["sync", "fs", "io-util", "time"] }
+futures-util = "0.3"
+sevenz-rust = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

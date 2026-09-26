@@ -1,0 +1,60 @@
+# The client's own commands, for its own window.
+#
+# Having any file in `permissions/` switches Tauri to checking every app
+# command against a permission - and until this file existed none were listed,
+# so every call the shell made (library, downloads, settings, even the Store's
+# own `catalog_url`) was refused with "Command not found". Every command in
+# `generate_handler!` in `src/lib.rs` must appear here; `lib.rs` has a test
+# that fails when one is missing.
+
+[[permission]]
+identifier = "allow-shell"
+description = "Everything the desktop shell calls: the Store view, the library, games, downloads and settings."
+commands.allow = [
+  "store_mount",
+  "store_visible",
+  "store_sign_out",
+  "store_mark_read",
+  "store_refresh_account",
+  "store_set_status",
+  "store_report_play",
+  "navigate_catalog",
+  "browser_navigate",
+  "catalog_url",
+  "control_catalog",
+  "open_external",
+  "settings_get",
+  "settings_save",
+  "library_list",
+  "library_add",
+  "library_save",
+  "library_remove",
+  "game_launch",
+  "game_launch_preview",
+  "game_running",
+  "game_stop",
+  "game_disk_size",
+  "open_folder",
+  "downloads_list",
+  "download_pause",
+  "download_resume",
+  "download_cancel",
+  "download_remove",
+  "storage_overview",
+  "storage_add_folder",
+  "storage_remove_folder",
+  "storage_set_default",
+  "storage_move",
+  "log_write",
+  "logs_tail",
+  "logs_folder",
+  "logs_send",
+  "shell_ready",
+  "app_exit",
+  "popup_open",
+  "popup_payload",
+  "popup_ready",
+  "popup_select",
+  "popup_close",
+  "popup_hover",
+]
