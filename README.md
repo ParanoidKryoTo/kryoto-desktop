@@ -21,6 +21,9 @@ pnpm dev          # the UI alone in a browser, on sample data (http://localhost:
 pnpm app:build    # the installer (NSIS on Windows, AppImage/.deb on Linux)
 ```
 
+`app:build` remaps the build machine's paths out of the binary and refuses to
+finish if the home folder is still in it.
+
 Debug builds run as `to.kryo.desktop.dev`, next to an installed copy without
 sharing its data, and never send error reports.
 

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "app:dev": "tauri dev",
-    "app:build": "tauri build",
+    "app:build": "node scripts/build.mjs",
     "brand": "node scripts/brand.mjs"
   },
   "dependencies": {
