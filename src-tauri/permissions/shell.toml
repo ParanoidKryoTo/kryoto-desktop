@@ -40,6 +40,7 @@ commands.allow = [
   "download_resume",
   "download_cancel",
   "download_remove",
+  "compat_tools",
   "storage_overview",
   "storage_add_folder",
   "storage_remove_folder",

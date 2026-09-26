@@ -761,13 +761,24 @@ fn extract_with_tar(archive: &Path, dest: &Path) -> Result<(), String> {
         let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         vec![(PathBuf::from(system).join(r"System32\tar.exe"), vec![])]
     };
+    // GNU tar cannot read 7z, so on Linux libarchive's bsdtar comes first,
+    // then 7-Zip under each of the names distributions give it.
     #[cfg(not(windows))]
-    let candidates: Vec<(PathBuf, Vec<String>)> =
-        vec![(PathBuf::from("bsdtar"), vec![]), (PathBuf::from("tar"), vec![])];
-    let mut last_error = String::from("no archive tool found");
-    for (tool, extra) in candidates {
+    let candidates: Vec<(PathBuf, Vec<String>)> = vec![
+        (PathBuf::from("bsdtar"), vec![]),
+        (PathBuf::from("7zz"), vec!["7z".into()]),
+        (PathBuf::from("7z"), vec!["7z".into()]),
+        (PathBuf::from("7za"), vec!["7z".into()]),
+        (PathBuf::from("tar"), vec![]),
+    ];
+    let mut last_error = String::from("no archive tool found (install bsdtar or 7-Zip)");
+    for (tool, style) in candidates {
         let mut cmd = std::process::Command::new(&tool);
-        cmd.args(&extra).arg("-xf").arg(archive).arg("-C").arg(dest);
+        if style.first().map(String::as_str) == Some("7z") {
+            cmd.arg("x").arg("-y").arg(format!("-o{}", dest.display())).arg(archive);
+        } else {
+            cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

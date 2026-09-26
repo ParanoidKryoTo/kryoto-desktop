@@ -47,13 +47,22 @@ fn disk_space_of(path: &Path) -> Option<(u64, u64)> {
     Some((s.f_blocks as u64 * block, s.f_bavail as u64 * block))
 }
 
-/// The drive a path is on, as the player knows it: `C:` on Windows, the path's
-/// mount root elsewhere (approximated by its first component).
+/// The drive a path is on, as the player knows it: `C:` on Windows, the
+/// mount point it lives under elsewhere (`/`, `/home`, `/mnt/games`).
 fn drive_of(path: &Path) -> String {
-    match path.components().next() {
-        Some(Component::Prefix(p)) => p.as_os_str().to_string_lossy().trim_end_matches('\\').to_uppercase(),
-        _ => "/".into(),
+    if let Some(Component::Prefix(p)) = path.components().next() {
+        return p.as_os_str().to_string_lossy().trim_end_matches('\\').to_uppercase();
     }
+    let full = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    mounts
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        // /proc/mounts writes a space in a path as \040.
+        .map(|m| m.replace("\\040", " "))
+        .filter(|m| full.starts_with(m))
+        .max_by_key(|m| m.len())
+        .unwrap_or_else(|| "/".into())
 }
 
 /// The game's own folder inside whichever library folder holds it: for
@@ -242,6 +251,12 @@ fn copy_tree(from: &Path, to: &Path, progress: &mut dyn FnMut(u64)) -> std::io::
         let entry = entry?;
         let target = to.join(entry.file_name());
         let kind = entry.file_type()?;
+        #[cfg(unix)]
+        if kind.is_symlink() {
+            // Linux games ship links (libraries, launch scripts); keep them links.
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &target)?;
+            continue;
+        }
         if kind.is_dir() {
             copy_tree(&entry.path(), &target, progress)?;
         } else if kind.is_file() {

@@ -262,12 +262,13 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
         let tool = input
             .compat_tool
             .ok_or("This is a Windows game. Pick Wine or Proton under Properties, Compatibility.")?;
-        let is_proton = tool
-            .file_name()
-            .map(|n| n.to_string_lossy().eq_ignore_ascii_case("proton"))
-            .unwrap_or(false);
+        let kind = crate::compat::kind_of(tool);
         chain.push(tool.to_string_lossy().into_owned());
-        if is_proton {
+        if kind == "umu" {
+            // umu-run is Proton outside Steam: a prefix and a game id is all it needs.
+            set_default(&mut env, "WINEPREFIX", &input.prefix_dir.to_string_lossy());
+            set_default(&mut env, "GAMEID", "0");
+        } else if kind == "proton" {
             chain.push("run".into());
             set_default(&mut env, "STEAM_COMPAT_DATA_PATH", &input.prefix_dir.to_string_lossy());
             let client = std::env::var("HOME")
@@ -317,6 +318,13 @@ pub fn command(plan: &LaunchPlan) -> std::process::Command {
     }
     cmd.envs(plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     cmd.current_dir(&plan.cwd);
+    // Its own process group, so Stop ends Wine/Proton and everything they
+    // started, not just the wrapper.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd
 }
 

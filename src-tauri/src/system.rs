@@ -80,6 +80,10 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
 /// hiding a sign-in screen in the tray would only look like it failed to close.
 pub static SHELL_READY: AtomicBool = AtomicBool::new(false);
 
+/// Whether the tray icon exists. Without one (a Linux desktop with no tray),
+/// closing must quit: a hidden window with no icon to bring it back is lost.
+pub static TRAY_OK: AtomicBool = AtomicBool::new(false);
+
 #[tauri::command]
 pub fn shell_ready(ready: bool) {
     SHELL_READY.store(ready, Ordering::SeqCst);
@@ -92,15 +96,19 @@ pub fn app_exit(app: AppHandle) {
 }
 
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    // First, because on Linux the tray only opens its menu - a click on the
+    // icon itself is not delivered there.
+    let open = MenuItem::with_id(app, "tray-open", "Open Kryoto", true, None::<&str>)?;
     let store = MenuItem::with_id(app, "tray-store", "Store", true, None::<&str>)?;
     let library = MenuItem::with_id(app, "tray-library", "Library", true, None::<&str>)?;
     let downloads = MenuItem::with_id(app, "tray-downloads", "Downloads", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "tray-settings", "Settings", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "tray-exit", "Exit Kryoto", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&store, &library, &downloads, &settings, &sep, &quit])?;
+    let sep_top = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &sep_top, &store, &library, &downloads, &settings, &sep, &quit])?;
     let mut builder = TrayIconBuilder::with_id("kryoto")
-        .tooltip("Kryoto Desktop")
+        .tooltip(if cfg!(debug_assertions) { "Kryoto Desktop Dev" } else { "Kryoto Desktop" })
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
@@ -110,7 +118,9 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 return;
             }
             show_main(app);
-            let _ = app.emit_to("main", "tray-go", id.trim_start_matches("tray-"));
+            if id != "tray-open" {
+                let _ = app.emit_to("main", "tray-go", id.trim_start_matches("tray-"));
+            }
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
@@ -121,6 +131,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         builder = builder.icon(icon.clone());
     }
     builder.build(app)?;
+    TRAY_OK.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -130,7 +141,8 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
     match event {
         WindowEvent::CloseRequested { api, .. } => {
             let app = window.app_handle();
-            if SHELL_READY.load(Ordering::SeqCst) && crate::settings::load(app).close_to_tray {
+            let to_tray = SHELL_READY.load(Ordering::SeqCst) && TRAY_OK.load(Ordering::SeqCst);
+            if to_tray && crate::settings::load(app).close_to_tray {
                 api.prevent_close();
                 hide_popup(app);
                 let _ = window.hide();
@@ -186,7 +198,11 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     let dir = std::path::Path::new(&home).join(".config/autostart");
     let file = dir.join("kryoto-desktop.desktop");
     if on {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        // An AppImage runs from a temporary mount; $APPIMAGE is the file itself.
+        let exe = match std::env::var_os("APPIMAGE") {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::env::current_exe().map_err(|e| e.to_string())?,
+        };
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         std::fs::write(
             &file,

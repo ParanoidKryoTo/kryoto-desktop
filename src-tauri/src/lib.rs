@@ -1,3 +1,4 @@
+mod compat;
 mod downloads;
 mod launch;
 mod library;
@@ -582,6 +583,7 @@ pub fn run() {
             downloads::download_resume,
             downloads::download_cancel,
             downloads::download_remove,
+            compat::compat_tools,
             storage::storage_overview,
             storage::storage_add_folder,
             storage::storage_remove_folder,

@@ -286,14 +286,17 @@ fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<us
         None => None,
     };
     let prefix = data_dir(app)?.join("prefixes").join(&game.id);
-    // The game's own pick, else the one in Settings.
-    let fallback = crate::settings::load(app).default_compat_tool;
-    let tool = game
-        .compat_tool
-        .as_deref()
-        .or(fallback.as_deref())
-        .filter(|t| !t.trim().is_empty())
-        .map(Path::new);
+    // The game's own pick, else the one in Settings, else the best one found
+    // on this computer (newest Proton, then umu-run, then Wine).
+    let own = game.compat_tool.clone().filter(|t| !t.trim().is_empty());
+    let fallback = crate::settings::load(app).default_compat_tool.filter(|t| !t.trim().is_empty());
+    let detected = if cfg!(windows) || own.is_some() || fallback.is_some() {
+        None
+    } else {
+        crate::compat::detect().into_iter().next().map(|t| t.path)
+    };
+    let tool = own.or(fallback).or(detected);
+    let tool = tool.as_deref().map(Path::new);
     launch::plan(&launch::PlanInput {
         install_dir: Path::new(&game.install_dir),
         executable: &game.executable,
