@@ -65,11 +65,15 @@ const sameView = (a: View, b: View) =>
   (a.kind !== 'settings' || a.section === (b as { section: SettingsSection }).section)
 
 /** Which top tab a kryo.to address lights, the way Steam lights its nav. */
-function tabForUrl(url: string): TopTab {
+function tabForUrl(url: string, catalogEndpoint?: string): TopTab {
   let path = '/'
   try {
     const u = new URL(url)
-    if (!/(^|\.)kryo\.to$/.test(u.hostname)) return 'store'
+    const endpoint = catalogEndpoint?.trim()
+    const isCatalog = endpoint
+      ? u.origin === new URL(endpoint).origin
+      : /(^|\.)kryo\.to$/.test(u.hostname)
+    if (!isCatalog) return 'store'
     path = u.pathname
   } catch {
     return 'store'
@@ -79,9 +83,19 @@ function tabForUrl(url: string): TopTab {
   return 'store'
 }
 
-function slugOnPage(url: string): string | null {
-  const m = url.match(/^https:\/\/kryo\.to\/game\/([a-z0-9-]+)/i)
-  return m?.[1] ? m[1].toLowerCase() : null
+function slugOnPage(url: string, catalogEndpoint?: string): string | null {
+  try {
+    const page = new URL(url)
+    const endpoint = catalogEndpoint?.trim()
+    const isCatalog = endpoint
+      ? page.origin === new URL(endpoint).origin
+      : /(^|\.)kryo\.to$/.test(page.hostname)
+    if (!isCatalog) return null
+    const m = page.pathname.match(/^\/game\/([a-z0-9-]+)/i)
+    return m?.[1] ? m[1].toLowerCase() : null
+  } catch {
+    return null
+  }
 }
 
 export function Shell({ startPage, account, browser }: { startPage: 'store' | 'library'; account: Account; browser: Browser }) {
@@ -254,6 +268,48 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   )
   const playEntry = useCallback((game: LibraryGame, entry: number) => void lib.play(game.id, entry), [lib])
 
+  // `kryoto://` links from kryo.to (src-tauri/src/links.rs): a game's page, or
+  // starting it - through the same Play as the library, so a game with more
+  // than one mode still asks which. Not installed: its page, to get it.
+  const openLink = useCallback(
+    (link: { action: string; slug: string }) => {
+      const game = lib.games.find((g) => g.slug === link.slug)
+      if (link.action === 'play' && game) {
+        go({ kind: 'game', id: game.id })
+        if (!lib.running.has(game.id)) play(game)
+      } else {
+        openWeb(`/game/${encodeURIComponent(link.slug)}`)
+      }
+    },
+    [lib.games, lib.running, go, play, openWeb],
+  )
+  const openLinkRef = useRef(openLink)
+  openLinkRef.current = openLink
+  // Links are held natively until taken (links.rs), so one that arrived before
+  // sign-in, or started the app, is still there. Taken once the library has
+  // loaded - "play" needs to know what is installed - and again on each
+  // "deep-link" nudge.
+  const libLoaded = useRef(false)
+  libLoaded.current = lib.loaded
+  const takeLink = useCallback(() => {
+    if (!libLoaded.current) return
+    void call<{ action: string; slug: string } | null>('take_pending_link')
+      .then((link) => link && openLinkRef.current(link))
+      .catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (lib.loaded) takeLink()
+  }, [lib.loaded, takeLink])
+  useEffect(() => {
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void on('deep-link', () => takeLink()).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [takeLink])
+
   const manageMenu = (g: LibraryGame): MenuEntry[] => [
     { label: 'Properties', icon: <SettingsIcon />, onSelect: () => setOverlay({ kind: 'props', id: g.id }) },
     {
@@ -338,7 +394,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     {
       id: 'store',
       label: 'Store',
-      onOpen: () => openWeb(view.kind === 'web' && tabForUrl(page.url) === 'store' ? undefined : '/'),
+      onOpen: () => openWeb(view.kind === 'web' && tabForUrl(page.url, settings?.catalogEndpoint) === 'store' ? undefined : '/'),
       items: [
         { label: 'Home', onSelect: () => openWeb('/') },
         { label: 'Browse', onSelect: () => openWeb('/browse') },
@@ -383,7 +439,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   ]
   const currentTab: TopTab =
     view.kind === 'web'
-      ? tabForUrl(page.url)
+      ? tabForUrl(page.url, settings?.catalogEndpoint)
       : view.kind === 'friends' || view.kind === 'settings'
         ? 'profile'
         : view.kind === 'community'
@@ -398,7 +454,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   ]
 
   /* ── Store helpers ── */
-  const pageSlug = view.kind === 'web' ? slugOnPage(page.url) : null
+  const pageSlug = view.kind === 'web' ? slugOnPage(page.url, settings?.catalogEndpoint) : null
   const pageGame = pageSlug ? (lib.games.find((g) => g.slug === pageSlug) ?? null) : null
   const addFromPage = pageSlug
     ? () => (pageGame ? go({ kind: 'game', id: pageGame.id }) : setOverlay({ kind: 'add', slug: pageSlug }))
@@ -416,7 +472,13 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     for (const d of dl) {
       if (known.current.has(d.id)) continue
       known.current.add(d.id)
-      push({ title: `Downloading ${d.meta.title}`, body: 'It installs itself when done. Open Downloads to watch it.', gameId: null })
+      // Before kryo.to has named it, the title is a slug or a placeholder.
+      const named = d.meta.title && d.meta.title !== 'Download' && d.meta.title !== d.slug
+      push({
+        title: named ? `Downloading ${d.meta.title}` : 'Download started',
+        body: 'It installs itself when done. Open Downloads to watch it.',
+        gameId: null,
+      })
     }
   }, [dl, push])
 
@@ -495,7 +557,13 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             onGetUpdate={() => openWeb(`/game/${selected.slug}?download=1`)}
             onGameChanged={lib.upsert}
             savedStatus={selected.slug ? (saved.find((e) => e.slug === selected.slug)?.status ?? null) : null}
-            onSetStatus={(st) => selected.slug && void setSavedStatus(selected.slug, st).catch((e) => lib.setError(errorText(e)))}
+            onSetStatus={(st) =>
+              selected.slug &&
+              void setSavedStatus(selected.slug, st, {
+                title: selected.title,
+                cover: selected.hero ?? selected.cover,
+              }).catch((e) => lib.setError(errorText(e)))
+            }
           />
         ) : lib.loaded && lib.games.length === 0 ? (
           <EmptyLibrary onStore={() => openWeb('/')} onAdd={() => setOverlay({ kind: 'add', slug: null })} />

@@ -19,6 +19,18 @@ use tauri::{
 /// Debug builds use their own port, so a development copy runs beside an
 /// installed one instead of handing over to it.
 const INSTANCE_PORT: u16 = if cfg!(debug_assertions) { 47_632 } else { 47_631 };
+
+/// The port, which a debug build can move with `KRYOTO_INSTANCE_PORT` so two
+/// development copies (two sessions testing at once) never hand links or
+/// "come to the front" to each other. A release build always uses its own.
+fn instance_port() -> u16 {
+    if cfg!(debug_assertions) {
+        if let Some(p) = std::env::var("KRYOTO_INSTANCE_PORT").ok().and_then(|v| v.parse().ok()) {
+            return p;
+        }
+    }
+    INSTANCE_PORT
+}
 const HELLO: &str = "kryoto-desktop show";
 const ANSWER: &str = "kryoto-desktop ok";
 
@@ -32,15 +44,21 @@ pub enum Instance {
 }
 
 pub fn claim_instance() -> Instance {
-    match TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
+    match TcpListener::bind(("127.0.0.1", instance_port())) {
         Ok(l) => Instance::First(l),
         Err(_) => {
-            let Ok(mut s) = TcpStream::connect_timeout(&([127, 0, 0, 1], INSTANCE_PORT).into(), Duration::from_millis(600))
+            let Ok(mut s) = TcpStream::connect_timeout(&([127, 0, 0, 1], instance_port()).into(), Duration::from_millis(600))
             else {
                 return Instance::Unguarded;
             };
             let _ = s.set_read_timeout(Some(Duration::from_millis(1200)));
-            if writeln!(s, "{HELLO}").is_err() {
+            // A `kryoto://` link this copy was started for rides on the same
+            // line, so the running copy opens it (see links.rs).
+            let hello = match crate::links::from_args() {
+                Some(link) => format!("{HELLO} {link}"),
+                None => HELLO.to_string(),
+            };
+            if writeln!(s, "{hello}").is_err() {
                 return Instance::Unguarded;
             }
             let mut line = String::new();
@@ -50,17 +68,27 @@ pub fn claim_instance() -> Instance {
     }
 }
 
-/// Answer later copies: bring the window back.
+/// Answer later copies: bring the window back, and open the link one carried.
 pub fn serve_instance<R: Runtime>(app: AppHandle<R>, listener: TcpListener) {
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
             let mut line = String::new();
             let mut reader = BufReader::new(&stream);
-            if reader.read_line(&mut line).is_ok() && line.trim() == HELLO {
-                let mut w = &stream;
-                let _ = writeln!(w, "{ANSWER}");
-                show_main(&app);
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let line = line.trim();
+            let link = match line.strip_prefix(HELLO) {
+                Some("") => None,
+                Some(rest) if rest.starts_with(' ') => Some(rest.trim().to_string()),
+                _ => continue,
+            };
+            let mut w = &stream;
+            let _ = writeln!(w, "{ANSWER}");
+            match link {
+                Some(url) => crate::links::deliver(&app, &url),
+                None => show_main(&app),
             }
         }
     });

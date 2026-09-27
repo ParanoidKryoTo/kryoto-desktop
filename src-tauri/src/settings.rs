@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};
 
+pub const DEFAULT_CATALOG_ENDPOINT: &str = "https://kryo.to";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -47,6 +49,8 @@ pub struct Settings {
     pub connections: u32,
     /// Download speed cap in MB/s; 0 is no cap.
     pub speed_limit_mb: u32,
+    /// Optional local or staging Kryo.to origin for development.
+    pub catalog_endpoint: String,
 }
 
 impl Default for Settings {
@@ -71,8 +75,54 @@ impl Default for Settings {
             share_playtime: true,
             connections: 8,
             speed_limit_mb: 0,
+            catalog_endpoint: String::new(),
         }
     }
+}
+
+pub fn normalize_catalog_endpoint(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let mut url = url::Url::parse(value)
+        .map_err(|_| "Use a full endpoint URL, such as http://localhost:3000.".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return Err("Use an http(s) site origin only, without a path, query or credentials.".into());
+    }
+    if url.scheme() == "http" {
+        let host = url.host_str().unwrap_or_default();
+        let loopback = host == "localhost"
+            || host.ends_with(".localhost")
+            || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        if !loopback {
+            return Err("Use HTTPS, or HTTP on localhost only.".into());
+        }
+    }
+    url.set_path("/");
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+pub fn catalog_endpoint(settings: &Settings) -> String {
+    normalize_catalog_endpoint(&settings.catalog_endpoint)
+        .ok()
+        .filter(|endpoint| !endpoint.is_empty())
+        .unwrap_or_else(|| DEFAULT_CATALOG_ENDPOINT.into())
+}
+
+pub fn is_catalog_origin(url: &url::Url, settings: &Settings) -> bool {
+    if !settings.catalog_endpoint.trim().is_empty() {
+        let Ok(endpoint) = url::Url::parse(&catalog_endpoint(settings)) else { return false };
+        return url.origin() == endpoint.origin();
+    }
+    let host = url.host_str().unwrap_or("");
+    url.scheme() == "https" && (host == "kryo.to" || host.ends_with(".kryo.to"))
 }
 
 fn file<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -127,14 +177,18 @@ pub fn settings_get(app: AppHandle) -> Settings {
 }
 
 #[tauri::command]
-pub fn settings_save(app: AppHandle, settings: Settings) -> Result<Settings, String> {
+pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings, String> {
     if settings.library_dir.trim().is_empty() {
         return Err("Pick a folder for the library.".into());
     }
+    settings.catalog_endpoint = normalize_catalog_endpoint(&settings.catalog_endpoint)?;
     std::fs::create_dir_all(&settings.library_dir)
         .map_err(|e| format!("Cannot use {}: {e}", settings.library_dir))?;
     let before = load(&app);
     write(&app, &settings)?;
+    if before.catalog_endpoint != settings.catalog_endpoint {
+        crate::catalog_endpoint_changed(&app, &settings)?;
+    }
     if before.start_with_system != settings.start_with_system {
         if let Err(e) = crate::system::set_autostart(settings.start_with_system) {
             crate::logging::error("settings", &format!("start with Windows: {e}"));
@@ -142,4 +196,27 @@ pub fn settings_save(app: AppHandle, settings: Settings) -> Result<Settings, Str
         }
     }
     Ok(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{catalog_endpoint, is_catalog_origin, normalize_catalog_endpoint, Settings, DEFAULT_CATALOG_ENDPOINT};
+
+    #[test]
+    fn custom_endpoint_is_a_safe_origin() {
+        assert_eq!(normalize_catalog_endpoint(" http://localhost:3000/ ").unwrap(), "http://localhost:3000");
+        assert_eq!(normalize_catalog_endpoint("").unwrap(), "");
+        assert!(normalize_catalog_endpoint("http://example.com").is_err());
+        assert!(normalize_catalog_endpoint("http://127.0.0.1:3000/path").is_err());
+        assert!(normalize_catalog_endpoint("https://user@example.com").is_err());
+    }
+
+    #[test]
+    fn custom_origin_replaces_the_production_catalog_trust() {
+        let settings = Settings { catalog_endpoint: "http://localhost:3000".into(), ..Default::default() };
+        assert_eq!(catalog_endpoint(&settings), "http://localhost:3000");
+        assert!(is_catalog_origin(&"http://localhost:3000/game/demo".parse().unwrap(), &settings));
+        assert!(!is_catalog_origin(&"https://kryo.to/game/demo".parse().unwrap(), &settings));
+        assert_eq!(catalog_endpoint(&Settings::default()), DEFAULT_CATALOG_ENDPOINT);
+    }
 }

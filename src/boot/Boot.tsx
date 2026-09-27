@@ -182,7 +182,7 @@ export function Welcome({
                   Sign in
                 </Button>
                 <p className="text-center text-[11px] leading-relaxed text-muted-foreground">
-                  Kryoto Desktop needs a kryo.to account. No account yet? Sign in has a link to make one.
+                  Sign in with your kryo.to account.
                 </p>
               </>
             )}

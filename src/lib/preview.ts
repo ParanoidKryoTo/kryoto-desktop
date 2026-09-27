@@ -237,6 +237,8 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   game_disk_size: () => 14_300_000_000,
   open_folder: () => null,
   settings_get: () => ({ ...settings }),
+  // Every sample game can use Kryoto Online, so the add-ons card shows it.
+  online_check: () => null,
   settings_save: (a) => Object.assign(settings, a.settings),
   downloads_list: () => clone(downloadList),
   storage_overview: () => ({

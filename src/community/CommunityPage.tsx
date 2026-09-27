@@ -6,6 +6,7 @@ import { adultBlur, useShowAdult } from '@/lib/adult'
 import type { LibraryGame } from '@/lib/library'
 import { formatPlaytime } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { catalogApiUrl } from '@/lib/endpoint'
 
 /**
  * Community: what everyone on kryo.to is playing, looking at and talking
@@ -96,7 +97,7 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
     if (!isTauri()) return
     setError(null)
     try {
-      const res = await fetch('https://kryo.to/api/community/stats', { cache: 'no-store' })
+      const res = await fetch(await catalogApiUrl('/api/community/stats'), { cache: 'no-store' })
       if (!res.ok) throw new Error(`kryo.to answered ${res.status}`)
       setStats((await res.json()) as Stats)
     } catch (e) {

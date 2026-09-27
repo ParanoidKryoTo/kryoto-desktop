@@ -270,9 +270,12 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
 
 /// Whether a download from the Store should be taken over: only kryo.to's own
 /// files. A mirror elsewhere downloads the way a browser would.
-pub fn is_ours(url: &url::Url) -> bool {
+pub fn is_ours(url: &url::Url, settings: &crate::settings::Settings) -> bool {
     let host = url.host_str().unwrap_or("");
     if url.scheme() == "https" && (host == "kryo.to" || host.ends_with(".kryo.to")) {
+        return true;
+    }
+    if crate::settings::is_catalog_origin(url, settings) {
         return true;
     }
     // Debug builds only: a local file server standing in for dl.kryo.to, so the
@@ -287,7 +290,7 @@ pub fn is_ours(url: &url::Url) -> bool {
 }
 
 /// Queue a download the Store handed over. `slug` is the game page it came from.
-pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>) {
+pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>, title: Option<String>) {
     let state = app.state::<Downloads>();
     // The same page's Download pressed twice while the first is still going.
     if let Ok(list) = state.list.lock() {
@@ -303,7 +306,13 @@ pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>
     let id = format!("dl-{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
     let item = Download {
         id: id.clone(),
-        meta: CatalogMeta { title: slug.clone().unwrap_or_else(|| "Download".into()), ..Default::default() },
+        meta: CatalogMeta {
+            title: title
+                .filter(|title| !title.trim().is_empty())
+                .or_else(|| slug.clone())
+                .unwrap_or_else(|| "Download".into()),
+            ..Default::default()
+        },
         slug,
         url,
         added_at: now(),
@@ -352,8 +361,8 @@ impl Notice {
     }
 }
 
-async fn fetch_meta(client: &reqwest::Client, slug: &str) -> Option<CatalogMeta> {
-    let res = client.get(format!("https://kryo.to/api/games/{slug}")).send().await.ok()?;
+async fn fetch_meta(client: &reqwest::Client, endpoint: &str, slug: &str) -> Option<CatalogMeta> {
+    let res = client.get(format!("{endpoint}/api/games/{slug}")).send().await.ok()?;
     if !res.status().is_success() {
         return None;
     }
@@ -410,6 +419,16 @@ pub fn filename_from_disposition(value: &str) -> Option<String> {
 /// A game's name from its archive's: `Captain Hardcore - Kryoto.7z` is
 /// "Captain Hardcore" - the extension and the `- Kryoto` signature every
 /// release file carries come off.
+/// A download that started with no game to name it after (no page, no
+/// catalog answer yet) reads "Download" in the list and its notices. Once the
+/// file's own name is known, that is a better name than none.
+fn name_from_file(d: &mut Download) {
+    let t = d.meta.title.trim();
+    if t.is_empty() || t == "Download" || d.slug.as_deref() == Some(t) {
+        d.meta.title = title_from_file(&d.file_name);
+    }
+}
+
 pub fn title_from_file(name: &str) -> String {
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).trim();
     let lower = stem.to_ascii_lowercase();
@@ -435,20 +454,19 @@ pub fn safe_name(name: &str) -> String {
 
 async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
     let downloads = app.state::<Downloads>();
-    let _permit = downloads.slot.acquire().await.map_err(|e| e.to_string())?;
-    if flag.load(Ordering::SeqCst) != RUN {
-        return settle_stopped(app, id, flag);
-    }
-    let item = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let settings = crate::settings::load(app);
     let client = reqwest::Client::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Named before waiting for a free slot, so a queued download reads as its
+    // game rather than as its slug until the ones ahead of it finish.
+    let item = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     if item.meta.executable.is_empty() && item.meta.version.is_none() {
         if let Some(slug) = &item.slug {
-            if let Some(meta) = fetch_meta(&client, slug).await {
+            let endpoint = crate::settings::catalog_endpoint(&settings);
+            if let Some(meta) = fetch_meta(&client, &endpoint, slug).await {
                 edit(app, id, |d| {
                     d.total = d.total.or(meta.size_bytes);
                     d.meta = meta;
@@ -457,6 +475,13 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
             }
         }
     }
+
+    let _permit = downloads.slot.acquire().await.map_err(|e| e.to_string())?;
+    if flag.load(Ordering::SeqCst) != RUN {
+        return settle_stopped(app, id, flag);
+    }
+    // Settings as they are now, not as they were when it was queued.
+    let settings = crate::settings::load(app);
 
     let already_complete = {
         let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
@@ -506,7 +531,7 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
         return;
     }
     #[allow(unused_mut)]
-    let mut base = "https://kryo.to".to_string();
+    let mut base = crate::settings::catalog_endpoint(&crate::settings::load(app));
     // Debug builds only, beside KRYOTO_DEV_DOWNLOAD_HOST: the stand-in filehost
     // also answers this, so a local archive can be checked against its own hash.
     #[cfg(debug_assertions)]
@@ -699,6 +724,7 @@ async fn transfer<R: Runtime>(
         edit(app, id, |d| {
             d.file_name = name.clone();
             d.archive_path = path.to_string_lossy().into_owned();
+            name_from_file(d);
         });
     }
 
@@ -842,6 +868,7 @@ async fn transfer_parallel<R: Runtime>(
         edit(app, id, |d| {
             d.file_name = name.clone();
             d.archive_path = path.to_string_lossy().into_owned();
+            name_from_file(d);
             d.total = Some(total);
             d.received = 0;
             d.segments = segments;
@@ -1008,7 +1035,10 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     set_status(app, id, Status::Extracting, None);
     let item = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let archive = PathBuf::from(&item.archive_path);
-    let title = if item.meta.title.is_empty() || item.slug.as_deref() == Some(item.meta.title.as_str()) {
+    let title = if item.meta.title.trim().is_empty()
+        || item.meta.title == "Download"
+        || item.slug.as_deref() == Some(item.meta.title.as_str())
+    {
         title_from_file(&item.file_name)
     } else {
         item.meta.title.clone()
@@ -1459,11 +1489,15 @@ mod tests {
 
     #[test]
     fn only_kryoto_downloads_are_taken_over() {
-        assert!(is_ours(&"https://dl.kryo.to/d/abc".parse().unwrap()));
-        assert!(is_ours(&"https://kryo.to/api/download/v/1".parse().unwrap()));
-        assert!(!is_ours(&"https://evil-kryo.to/x".parse().unwrap()));
-        assert!(!is_ours(&"http://dl.kryo.to/d/abc".parse().unwrap()));
-        assert!(!is_ours(&"https://vikingfile.com/f/x".parse().unwrap()));
+        let settings = crate::settings::Settings::default();
+        assert!(is_ours(&"https://dl.kryo.to/d/abc".parse().unwrap(), &settings));
+        assert!(is_ours(&"https://kryo.to/api/download/v/1".parse().unwrap(), &settings));
+        assert!(!is_ours(&"https://evil-kryo.to/x".parse().unwrap(), &settings));
+        assert!(!is_ours(&"http://dl.kryo.to/d/abc".parse().unwrap(), &settings));
+        assert!(!is_ours(&"https://vikingfile.com/f/x".parse().unwrap(), &settings));
+        let local = crate::settings::Settings { catalog_endpoint: "http://localhost:3000".into(), ..Default::default() };
+        assert!(is_ours(&"http://localhost:3000/api/download/v/1".parse().unwrap(), &local));
+        assert!(!is_ours(&"http://localhost:3001/api/download/v/1".parse().unwrap(), &local));
     }
 
     #[test]

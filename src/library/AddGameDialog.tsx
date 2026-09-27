@@ -6,11 +6,12 @@ import { errorText, isTauri } from '@/lib/bridge'
 import { fetchCatalogGame, library, slugFrom, type CatalogGame, type LibraryGame } from '@/lib/library'
 import { adultBlur, useShowAdult } from '@/lib/adult'
 import { cn } from '@/lib/utils'
+import { catalogApiUrl } from '@/lib/endpoint'
 
 type Hit = { slug: string; title: string; developer: string | null; year: number | null; cover_vertical: string | null; cover: string | null; nsfw: boolean }
 
 async function search(q: string): Promise<Hit[]> {
-  const res = await fetch(`https://kryo.to/api/games/search?q=${encodeURIComponent(q)}&limit=6`)
+  const res = await fetch(await catalogApiUrl(`/api/games/search?q=${encodeURIComponent(q)}&limit=6`))
   if (!res.ok) return []
   return ((await res.json()) as { results?: Hit[] }).results ?? []
 }

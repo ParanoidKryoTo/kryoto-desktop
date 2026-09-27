@@ -17,7 +17,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime};
 
-const REPORT_URL: &str = "https://kryo.to/api/desktop/reports";
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_QUEUED: usize = 200;
 
@@ -147,7 +146,8 @@ pub fn error(scope: &str, message: &str) {
 async fn flush<R: Runtime>(app: &AppHandle<R>) {
     let Some(l) = LOGGER.get() else { return };
     // Development builds do not report to kryo.to.
-    if cfg!(debug_assertions) || !crate::settings::load(app).send_reports {
+    let settings = crate::settings::load(app);
+    if cfg!(debug_assertions) || !settings.send_reports {
         if let Ok(mut q) = l.queue.lock() {
             q.clear();
         }
@@ -171,7 +171,8 @@ async fn flush<R: Runtime>(app: &AppHandle<R>) {
     else {
         return;
     };
-    if let Ok(res) = client.post(REPORT_URL).json(&body).send().await {
+    let endpoint = crate::settings::catalog_endpoint(&settings);
+    if let Ok(res) = client.post(format!("{endpoint}/api/desktop/reports")).json(&body).send().await {
         if res.status().is_success() {
             if let Ok(mut q) = l.queue.lock() {
                 let sent = batch.len().min(q.len());
@@ -254,7 +255,7 @@ pub async fn logs_send(app: AppHandle) -> Result<usize, String> {
     flush(&app).await;
     let left = LOGGER.get().and_then(|l| l.queue.lock().ok().map(|q| q.len())).unwrap_or(0);
     if left > 0 && crate::settings::load(&app).send_reports {
-        return Err("kryo.to did not take the report. It stays queued and is tried again every minute.".into());
+        return Err("The selected endpoint did not take the report. It stays queued and is tried again every minute.".into());
     }
     Ok(queued - left)
 }

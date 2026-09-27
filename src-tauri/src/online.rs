@@ -196,6 +196,67 @@ fn place(root: &Path, from: &Path, to: &Path, rec: &mut LocalOnline) -> Result<(
     Ok(())
 }
 
+/// Why a game has no use for Kryoto Online, or `None` when it does.
+///
+/// It is for games Steam says play online, whose release does not already
+/// bring its own way online: kryo.to marks those releases multiplayer, and
+/// older ones say so in their source (OFME, Online-Fix, Kryoto Online).
+pub fn online_unneeded(game: &serde_json::Value, local_source: Option<&str>) -> Option<&'static str> {
+    if game["multiplayer"].as_bool() == Some(true) {
+        return Some("This release already plays online.");
+    }
+    let has_fix = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        s.contains("ofme")
+            || s.contains("online-fix")
+            || s.contains("onlinefix")
+            || s.contains("online fix")
+            || s.contains("kryoto online")
+            || s.contains("kryotoo")
+    };
+    if [game["source"].as_str(), local_source].into_iter().flatten().any(has_fix) {
+        return Some("This release already plays online.");
+    }
+    let features: Vec<&str> = game["features"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
+    let has = |name: &str| features.iter().any(|f| f.eq_ignore_ascii_case(name));
+    let online = has("Online Co-op")
+        || has("Online PvP")
+        || has("MMO")
+        || has("Cross-Platform Multiplayer")
+        // Steam's plain "Multi-player" with no split screen listed is online.
+        || (has("Multi-player") && !features.iter().any(|f| f.to_ascii_lowercase().contains("split screen")));
+    if !online {
+        return Some("Steam does not list online play for this game.");
+    }
+    None
+}
+
+async fn catalog_game<R: tauri::Runtime>(app: &AppHandle<R>, client: &reqwest::Client, slug: &str) -> Result<serde_json::Value, String> {
+    let endpoint = crate::settings::catalog_endpoint(&crate::settings::load(app));
+    let res = client.get(format!("{endpoint}/api/games/{slug}")).send().await.map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("kryo.to answered {}.", res.status().as_u16()));
+    }
+    let json = res.json::<serde_json::Value>().await.map_err(|e| e.to_string())?;
+    Ok(json["game"].clone())
+}
+
+fn client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Whether the game page offers Kryoto Online: `None` when it does, else why not.
+#[tauri::command]
+pub async fn online_check(app: AppHandle, game_id: String) -> Result<Option<String>, String> {
+    let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
+    let Some(slug) = game.slug.clone() else { return Ok(Some("Not linked to a kryo.to page.".into())) };
+    let catalog = catalog_game(&app, &client()?, &slug).await?;
+    Ok(online_unneeded(&catalog, game.source.as_deref()).map(String::from))
+}
+
 #[tauri::command]
 pub async fn online_apply(app: AppHandle, game_id: String) -> Result<LibraryGame, String> {
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
@@ -203,18 +264,12 @@ pub async fn online_apply(app: AppHandle, game_id: String) -> Result<LibraryGame
         return Err("Kryoto Online is already set up for this game.".into());
     }
     let slug = game.slug.clone().ok_or("Link the game to its kryo.to page first (Properties, kryo.to).")?;
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let appid = client
-        .get(format!("https://kryo.to/api/games/{slug}"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())?["game"]["steam_appid"]
+    let client = client()?;
+    let catalog = catalog_game(&app, &client, &slug).await?;
+    if let Some(why) = online_unneeded(&catalog, game.source.as_deref()) {
+        return Err(why.into());
+    }
+    let appid = catalog["steam_appid"]
         .as_str()
         .map(str::trim)
         .filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_digit()))
@@ -327,6 +382,26 @@ pub fn online_undo(app: AppHandle, game_id: String) -> Result<LibraryGame, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn online_is_offered_only_where_it_is_missing() {
+        let g = |v: serde_json::Value| v;
+        let online = serde_json::json!(["Single-player", "Multi-player", "Online Co-op"]);
+        // Steam lists online play, the release has no way online: offered.
+        assert_eq!(online_unneeded(&g(serde_json::json!({"features": online, "source": "Steam + gbe_fork"})), None), None);
+        // Marked multiplayer on kryo.to: the release brings its own.
+        assert!(online_unneeded(&g(serde_json::json!({"features": online, "multiplayer": true})), None).is_some());
+        // Older releases only say so in their source.
+        for source in ["OFME", "Steam + Online-Fix", "onlinefix", "Steam + Kryoto Online", "KryotoO"] {
+            assert!(online_unneeded(&g(serde_json::json!({"features": online, "source": source})), None).is_some(), "{source}");
+        }
+        assert!(online_unneeded(&g(serde_json::json!({"features": online})), Some("OFME")).is_some());
+        // Single-player, or split screen only: nothing to play online.
+        assert!(online_unneeded(&g(serde_json::json!({"features": ["Single-player"]})), None).is_some());
+        assert!(online_unneeded(&g(serde_json::json!({"features": ["Multi-player", "Shared/Split Screen Co-op"]})), None).is_some());
+        assert_eq!(online_unneeded(&g(serde_json::json!({"features": ["Multi-player"]})), None), None);
+        assert!(online_unneeded(&g(serde_json::json!({})), None).is_some());
+    }
 
     #[test]
     fn set_up_then_undo_leaves_the_game_as_it_was() {

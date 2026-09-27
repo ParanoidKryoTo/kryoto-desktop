@@ -38,11 +38,28 @@ export function AddonsCard({
     }
   }, [game.slug])
 
+  // Kryoto Online is offered where Steam says the game plays online and the
+  // release has no way online of its own (online.rs, online_unneeded).
+  // Unknown - offline, or kryo.to did not answer - counts as not offered.
+  const [onlineOffered, setOnlineOffered] = useState(false)
+  useEffect(() => {
+    setOnlineOffered(false)
+    if (!game.slug || game.online) return
+    let cancelled = false
+    void library
+      .onlineCheck(game.id)
+      .then((why) => !cancelled && setOnlineOffered(why === null))
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [game.id, game.slug, game.online])
+
   const applied = game.addons ?? []
   const appliedFiles = new Set(applied.map((a) => a.file.toLowerCase()))
   const isApplied = (a: KryoAddon) => a.links.some((l) => l.name && appliedFiles.has(l.name.toLowerCase()))
   const kryoOnline = (available ?? []).find(isOnline)
-  const releaseIsOnline = /kryoto online/i.test(game.source ?? '')
+  const showOnline = !!game.online || onlineOffered
 
   const run = async (key: string, job: () => Promise<LibraryGame>) => {
     setBusy(key)
@@ -57,7 +74,7 @@ export function AddonsCard({
   }
 
   if (available === null) return null
-  const nothing = available.length === 0 && applied.length === 0 && !game.online && (releaseIsOnline || !game.slug)
+  const nothing = available.length === 0 && applied.length === 0 && !showOnline
   if (nothing) return null
 
   return (
@@ -97,7 +114,7 @@ export function AddonsCard({
         />
       ))}
 
-      {!releaseIsOnline && game.slug ? (
+      {showOnline ? (
         <Row
           title="Kryoto Online on this PC"
           sub={

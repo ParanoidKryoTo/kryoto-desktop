@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { call, isTauri, on } from '@/lib/bridge'
-import { fetchCatalogGame } from '@/lib/library'
+import { fetchCatalogGame, type LibraryGame } from '@/lib/library'
 
 /**
  * The signed-in account's kryo.to library - the games marked Playing, Plan to
@@ -53,15 +53,30 @@ export function useSaved(): SavedEntry[] {
 }
 
 /** Change a game's status on kryo.to (`null` takes it out of the library). */
-export function setSavedStatus(slug: string, status: SavedStatus | null) {
+export function setSavedStatus(
+  slug: string,
+  status: SavedStatus | null,
+  game?: Pick<LibraryGame, 'title' | 'cover'>,
+) {
   if (!isTauri()) {
     current = status
-      ? [...current.filter((e) => e.slug !== slug), { slug, status, title: slug, cover: '', updatedAt: '' }]
+      ? [...current.filter((e) => e.slug !== slug), {
+          slug,
+          status,
+          title: game?.title || slug,
+          cover: game?.cover || '',
+          updatedAt: '',
+        }]
       : current.filter((e) => e.slug !== slug)
     subs.forEach((fn) => fn(current))
     return Promise.resolve()
   }
-  return call<void>('store_set_status', { slug, status })
+  return call<void>('store_set_status', {
+    slug,
+    status,
+    title: game?.title ?? '',
+    cover: game?.cover ?? '',
+  })
 }
 
 /* Saved entries carry a cover but not whether the game is adult, so their

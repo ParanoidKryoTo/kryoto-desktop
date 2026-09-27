@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { call } from '@/lib/bridge'
+import { clearCatalogEndpointCache } from '@/lib/endpoint'
 
 export type Palette = 'monochrome' | 'oled' | 'amber' | 'emerald' | 'nord' | 'sepia' | 'blossom'
 export type Radius = 'sharp' | 'soft' | 'rounded' | 'round' | 'pill'
@@ -31,6 +32,8 @@ export type Settings = {
   connections: number
   /** MB/s cap; 0 is none. */
   speedLimitMb: number
+  /** Blank uses production; set a local site origin while developing. */
+  catalogEndpoint: string
 }
 
 /** kryo.to's palettes, named as the site names them. */
@@ -107,11 +110,13 @@ function publish(s: Settings) {
 export const settingsApi = {
   get: async () => {
     const s = await call<Settings>('settings_get')
+    clearCatalogEndpointCache()
     publish(s)
     return s
   },
   save: async (settings: Settings) => {
     const s = await call<Settings>('settings_save', { settings })
+    clearCatalogEndpointCache()
     publish(s)
     return s
   },

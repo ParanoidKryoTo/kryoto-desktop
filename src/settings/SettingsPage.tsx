@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bell, Download, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
-import { AsciiBar, Button, Caption, Check, Section, Segmented } from '@/ui'
+import { Bell, Code2, Download, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
+import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { settingsApi, useSettings, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
@@ -32,6 +32,7 @@ export type SettingsSection =
   | 'storage'
   | 'downloads'
   | 'compat'
+  | 'developer'
   | 'logs'
 
 /** kryo.to's settings, by the fragment that opens each category there. */
@@ -72,6 +73,7 @@ export function SettingsPage({
     { id: 'storage', label: 'Storage', icon: <HardDrive /> },
     { id: 'downloads', label: 'Downloads', icon: <Download /> },
     ...(isWindowsHost() ? [] : [{ id: 'compat' as const, label: 'Compatibility', icon: <Wrench /> }]),
+    { id: 'developer', label: 'Developer', icon: <Code2 /> },
     { id: 'logs', label: 'Logs', icon: <ScrollText /> },
   ]
   const name = account.displayName || account.username
@@ -183,10 +185,14 @@ function DesktopPane({ section }: { section: SettingsSection }) {
   const stored = useSettings()
   const [s, setS] = useState<Settings | null>(stored)
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | string>('idle')
+  const [endpointDraft, setEndpointDraft] = useState(stored?.catalogEndpoint ?? '')
   const timer = useRef<number | undefined>(undefined)
   useEffect(() => {
     if (stored && !s) setS(stored)
   }, [stored, s])
+  useEffect(() => {
+    if (stored) setEndpointDraft(stored.catalogEndpoint)
+  }, [stored?.catalogEndpoint])
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => {
     if (!s) return
@@ -211,6 +217,21 @@ function DesktopPane({ section }: { section: SettingsSection }) {
     downloads: 'Downloads',
     compat: 'Compatibility',
     logs: 'Logs',
+    developer: 'Developer',
+  }
+
+  const applyEndpoint = () => {
+    const endpoint = endpointDraft.trim()
+    setState('saving')
+    void settingsApi
+      .get()
+      .then((latest) => settingsApi.save({ ...latest, catalogEndpoint: endpoint }))
+      .then((saved) => {
+        setS(saved)
+        setEndpointDraft(saved.catalogEndpoint)
+        setState('saved')
+      })
+      .catch((e: unknown) => setState(errorText(e)))
   }
 
   return (
@@ -269,6 +290,35 @@ function DesktopPane({ section }: { section: SettingsSection }) {
         {section === 'compat' ? (
           <Section title="Run Windows games with" hint="Games can pick their own under Properties, Compatibility.">
             <CompatPicker value={s.defaultCompatTool} onChange={(v) => set('defaultCompatTool', v)} />
+          </Section>
+        ) : null}
+        {section === 'developer' ? (
+          <Section title="Kryo.to endpoint" hint="Blank uses production. For local testing, use http://localhost:3000.">
+            <div className="grid gap-3">
+              <label className="grid gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                Site origin
+                <input
+                  className={inputCls}
+                  type="url"
+                  value={endpointDraft}
+                  onChange={(e) => setEndpointDraft(e.target.value)}
+                  placeholder="https://kryo.to"
+                  spellCheck={false}
+                />
+              </label>
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                This changes the Store, catalog requests and download metadata. Sign in separately on the selected site.
+                HTTP is allowed on localhost only.
+              </p>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={applyEndpoint}
+                disabled={state === 'saving' || endpointDraft.trim() === s.catalogEndpoint}
+              >
+                Apply endpoint
+              </Button>
+            </div>
           </Section>
         ) : null}
         {section === 'logs' ? <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} /> : null}

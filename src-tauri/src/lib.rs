@@ -3,6 +3,7 @@ mod compat;
 mod downloads;
 mod launch;
 mod library;
+mod links;
 mod logging;
 mod online;
 mod settings;
@@ -95,9 +96,32 @@ fn allowed_browser_url(url: &url::Url) -> bool {
     (url.scheme() == "https" || url.scheme() == "http") && !url.host_str().unwrap_or("").is_empty()
 }
 
-fn is_kryoto(url: &url::Url) -> bool {
-    let host = url.host_str().unwrap_or("");
-    host == "kryo.to" || host.ends_with(".kryo.to")
+fn is_kryoto<R: Runtime>(url: &url::Url, app: &tauri::AppHandle<R>) -> bool {
+    settings::is_catalog_origin(url, &settings::load(app))
+}
+
+fn map_catalog_url(url: url::Url, endpoint: &str) -> Result<url::Url, String> {
+    let production = HOME.parse::<url::Url>().map_err(|e| e.to_string())?;
+    if url.origin() != production.origin() {
+        return Ok(url);
+    }
+    let mut mapped = url::Url::parse(endpoint).map_err(|e| e.to_string())?;
+    mapped.set_path(url.path());
+    mapped.set_query(url.query());
+    mapped.set_fragment(url.fragment());
+    Ok(mapped)
+}
+
+pub(crate) fn catalog_endpoint_changed<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    settings: &settings::Settings,
+) -> Result<(), String> {
+    if let Some(view) = app.get_webview(STORE) {
+        let endpoint = settings::catalog_endpoint(settings);
+        let url = url::Url::parse(&format!("{endpoint}/")).map_err(|e| e.to_string())?;
+        view.navigate(url).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn block_reason(url: &url::Url) -> String {
@@ -174,7 +198,6 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   });
   try { new MutationObserver(() => report()).observe(document.querySelector('title') || document.head, { childList: true, subtree: true, characterData: true }); } catch (_) {}
   const who = () => {
-    if (location.hostname !== 'kryo.to') return;
     fetch('/api/changelog/latest').then((r) => r.json()).then((j) => report({ news: j })).catch(() => {});
     fetch('/api/auth/me', { credentials: 'include' })
       .then((r) => r.json())
@@ -246,13 +269,38 @@ fn open_external(url: String) -> Result<(), String> {
     open_external_url(&url)
 }
 
-/// The kryo.to game page slug in a URL, if it is one.
-fn game_slug(url: &url::Url) -> Option<String> {
-    if !is_kryoto(url) {
+/// The game a kryo.to page is showing: its own page (`/game/<slug>`), or the
+/// card open on the home and browse boards (`?game=<slug>`), whose modal has
+/// its own Download.
+fn game_slug(url: &url::Url, settings: &settings::Settings) -> Option<String> {
+    if !settings::is_catalog_origin(url, settings) {
         return None;
     }
+    let valid = |s: &str| {
+        !s.is_empty() && s.len() <= 160 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
     let mut parts = url.path_segments()?;
-    (parts.next()? == "game").then(|| parts.next().map(String::from)).flatten()
+    if parts.next() == Some("game") {
+        if let Some(slug) = parts.next().filter(|s| valid(s)) {
+            return Some(slug.to_ascii_lowercase());
+        }
+    }
+    url.query_pairs()
+        .find(|(k, _)| k == "game")
+        .map(|(_, v)| v.into_owned())
+        .filter(|s| valid(s))
+        .map(|s| s.to_ascii_lowercase())
+}
+
+fn download_context(url: &url::Url) -> (Option<String>, Option<String>) {
+    let Some(fragment) = url.fragment() else { return (None, None) };
+    let fields: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(fragment.as_bytes()).into_owned().collect();
+    let slug = fields.get("kryoto-game").filter(|slug| {
+        !slug.is_empty() && slug.len() <= 120 && slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
+    let title = fields.get("kryoto-title").filter(|title| !title.trim().is_empty() && title.len() <= 300);
+    (slug.map(|slug| slug.to_ascii_lowercase()), title.cloned())
 }
 
 /// Create the Store web view (or move it) inside the main window.
@@ -280,6 +328,8 @@ async fn store_mount(
         return Ok(());
     }
     let parsed: url::Url = url.parse().map_err(|_| "Not a valid address.".to_string())?;
+    let endpoint = settings::catalog_endpoint(&settings::load(&app));
+    let parsed = map_catalog_url(parsed, &endpoint)?;
     let window = app.get_window("main").ok_or("The main window is gone.")?;
     let popup_app = app.clone();
     let mut builder = WebviewBuilder::new(STORE, WebviewUrl::External(parsed));
@@ -295,17 +345,32 @@ async fn store_mount(
         .transparent(true)
         .on_download(|webview, event| match event {
             DownloadEvent::Requested { url, .. } => {
-                if !downloads::is_ours(&url) {
+                let settings = settings::load(webview.app_handle());
+                if !downloads::is_ours(&url, &settings) {
                     return true;
                 }
-                let slug = webview.url().ok().and_then(|u| game_slug(&u));
-                downloads::enqueue(webview.app_handle(), url.to_string(), slug);
+                let (slug, title) = download_context(&url);
+                let slug = slug.or_else(|| webview.url().ok().and_then(|u| game_slug(&u, &settings)));
+                let mut clean_url = url;
+                clean_url.set_fragment(None);
+                downloads::enqueue(webview.app_handle(), clean_url.to_string(), slug, title);
                 false
             }
             _ => true,
         })
         .on_new_window(move |url, _features| {
-            if is_kryoto(&url) {
+            let endpoint = settings::catalog_endpoint(&settings::load(&popup_app));
+            let url = match map_catalog_url(url.clone(), &endpoint) {
+                Ok(url) => url,
+                Err(error) => {
+                    let _ = popup_app.emit(
+                        "browser-error",
+                        BrowserErrorEvent { url: url.to_string(), reason: error },
+                    );
+                    return NewWindowResponse::Deny;
+                }
+            };
+            if is_kryoto(&url, &popup_app) {
                 if let Some(view) = popup_app.get_webview(STORE) {
                     let _ = view.navigate(url);
                 }
@@ -321,7 +386,7 @@ async fn store_mount(
         let _ = view.hide();
     }
     #[cfg(windows)]
-    allow_repeat_downloads(&view);
+    allow_repeat_downloads(&view, settings::load(&app));
     Ok(())
 }
 
@@ -330,12 +395,12 @@ async fn store_mount(
 /// every further download, and WebView2 has nowhere to ask, so the second game
 /// of a session never arrived. kryo.to pages may; nothing else is let through.
 #[cfg(windows)]
-fn allow_repeat_downloads(view: &tauri::Webview) {
+fn allow_repeat_downloads(view: &tauri::Webview, settings: settings::Settings) {
     let _ = view.with_webview(|w| unsafe {
         use webview2_com::Microsoft::Web::WebView2::Win32::*;
         use webview2_com::PermissionRequestedEventHandler;
         let Ok(core) = w.controller().CoreWebView2() else { return };
-        let handler = PermissionRequestedEventHandler::create(Box::new(|_, args| {
+        let handler = PermissionRequestedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else { return Ok(()) };
             let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
             args.PermissionKind(&mut kind)?;
@@ -345,7 +410,10 @@ fn allow_repeat_downloads(view: &tauri::Webview) {
             let mut uri = windows::core::PWSTR::null();
             args.Uri(&mut uri)?;
             let uri = webview2_com::take_pwstr(uri);
-            if uri.parse::<url::Url>().is_ok_and(|u| u.scheme() == "https" && is_kryoto(&u)) {
+            if uri
+                .parse::<url::Url>()
+                .is_ok_and(|u| downloads::is_ours(&u, &settings))
+            {
                 args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
             }
             Ok(())
@@ -378,7 +446,8 @@ fn navigate_catalog(app: tauri::AppHandle, path: String) -> Result<(), String> {
     if !path.starts_with('/') || path.contains("://") || path.contains('\\') {
         return Err("Invalid catalog path".to_string());
     }
-    browser_navigate(app, format!("{HOME}{path}"))
+    let endpoint = settings::catalog_endpoint(&settings::load(&app));
+    browser_navigate(app, format!("{endpoint}{path}"))
 }
 
 /// Address-bar navigation. Only http(s) without credentials.
@@ -391,7 +460,8 @@ fn browser_navigate(app: tauri::AppHandle, url: String) -> Result<(), String> {
     if !parsed.username().is_empty() {
         return Err("Addresses with embedded credentials are blocked.".to_string());
     }
-    store(&app)?.navigate(parsed).map_err(|e| e.to_string())
+    let endpoint = settings::catalog_endpoint(&settings::load(&app));
+    store(&app)?.navigate(map_catalog_url(parsed, &endpoint)?).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -399,7 +469,7 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
     let view = store(&app)?;
     let actual = view.url().map_err(|e| e.to_string())?;
     // Only kryo.to itself may say who is signed in, or what is in their inbox.
-    if is_kryoto(&actual) {
+    if is_kryoto(&actual, &app) {
         if let Some(account) = state.account {
             logging::set_account(account.as_ref().map(|a| a.username.clone()));
             let _ = app.emit("account-state", account);
@@ -433,8 +503,10 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
 #[tauri::command]
 fn store_sign_out(app: tauri::AppHandle) -> Result<(), String> {
     let view = store(&app)?;
-    if !view.url().map(|u| is_kryoto(&u)).unwrap_or(false) {
-        view.navigate(HOME.parse().map_err(|_| "bad home")?).map_err(|e| e.to_string())?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        let endpoint = settings::catalog_endpoint(&settings::load(&app));
+        view.navigate(format!("{endpoint}/").parse().map_err(|e: url::ParseError| e.to_string())?)
+            .map_err(|e| e.to_string())?;
         return Err("Open kryo.to first, then sign out.".into());
     }
     view.eval("fetch('/api/auth/logout',{method:'POST',credentials:'include'}).finally(()=>{location.href='/'})")
@@ -445,7 +517,7 @@ fn store_sign_out(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn store_mark_read(app: tauri::AppHandle) -> Result<(), String> {
     let view = store(&app)?;
-    if !view.url().map(|u| is_kryoto(&u)).unwrap_or(false) {
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
         return Err("Open kryo.to first.".into());
     }
     view.eval(
@@ -458,7 +530,13 @@ fn store_mark_read(app: tauri::AppHandle) -> Result<(), String> {
 /// `completed`, `onhold`, `dropped`, `favorite`), or take it out with `None`.
 /// Runs in the Store's page, with the session the player signed in with.
 #[tauri::command]
-fn store_set_status(app: tauri::AppHandle, slug: String, status: Option<String>) -> Result<(), String> {
+fn store_set_status(
+    app: tauri::AppHandle,
+    slug: String,
+    status: Option<String>,
+    title: Option<String>,
+    cover: Option<String>,
+) -> Result<(), String> {
     const STATUSES: [&str; 6] = ["playing", "plan", "completed", "onhold", "dropped", "favorite"];
     if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("Not a kryo.to game.".into());
@@ -467,13 +545,23 @@ fn store_set_status(app: tauri::AppHandle, slug: String, status: Option<String>)
         return Err("Not a library status.".into());
     }
     let view = store(&app)?;
-    if !view.url().map(|u| is_kryoto(&u)).unwrap_or(false) {
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
         return Err("Open kryo.to first.".into());
     }
     let call = match status {
-        Some(s) => format!(
-            "fetch('/api/account/library',{{method:'PUT',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',status:'{s}'}})}})"
-        ),
+        Some(s) => {
+            let body = serde_json::json!({
+                "slug": slug,
+                "status": s,
+                "title": title.unwrap_or_default(),
+                "cover": cover.unwrap_or_default(),
+            })
+            .to_string();
+            let body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+            format!(
+                "fetch('/api/account/library',{{method:'PUT',credentials:'include',headers:{{'content-type':'application/json'}},body:{body}}})"
+            )
+        }
         None => format!("fetch('/api/account/library?slug={slug}',{{method:'DELETE',credentials:'include'}})"),
     };
     view.eval(format!("{call}.finally(()=>window.__kryoDesktopRefresh&&window.__kryoDesktopRefresh())"))
@@ -492,7 +580,7 @@ fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, secon
         return Err("Not a play session.".into());
     }
     let view = store(&app)?;
-    if !view.url().map(|u| is_kryoto(&u)).unwrap_or(false) {
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
         return Err("Open kryo.to first.".into());
     }
     view.eval(format!(
@@ -534,6 +622,10 @@ pub fn run() {
         return;
     }
     let to_tray = std::env::args().any(|a| a == "--tray");
+    // Started by a `kryoto://` link: the shell takes it once it is ready.
+    if let Some(link) = links::from_args() {
+        links::set_pending(&link);
+    }
     let mut listener = match instance {
         system::Instance::First(l) => Some(l),
         _ => None,
@@ -546,6 +638,8 @@ pub fn run() {
         .setup(move |app| {
             logging::init(app.handle());
             logging::start_reporter(app.handle().clone());
+            // Off the main thread: registry and xdg-mime are not worth a frame.
+            std::thread::spawn(links::register);
             downloads::init(app.handle());
             if let Some(l) = listener.take() {
                 system::serve_instance(app.handle().clone(), l);
@@ -569,8 +663,42 @@ pub fn run() {
         .plugin(
             PluginBuilder::<tauri::Wry, ()>::new("catalog-policy")
                 .on_navigation(|webview, url| {
-                    if webview.label() != STORE || allowed_browser_url(url) {
+                    if webview.label() != STORE {
                         return true;
+                    }
+                    if allowed_browser_url(url) {
+                        let settings = settings::load(webview.app_handle());
+                        let endpoint = settings::catalog_endpoint(&settings);
+                        match map_catalog_url(url.clone(), &endpoint) {
+                            Ok(mapped) if mapped != *url => {
+                                if let Err(error) = webview.navigate(mapped) {
+                                    let _ = webview.app_handle().emit(
+                                        "browser-error",
+                                        BrowserErrorEvent {
+                                            url: url.to_string(),
+                                            reason: error.to_string(),
+                                        },
+                                    );
+                                }
+                                return false;
+                            }
+                            Ok(_) => return true,
+                            Err(error) => {
+                                let _ = webview.app_handle().emit(
+                                    "browser-error",
+                                    BrowserErrorEvent {
+                                        url: url.to_string(),
+                                        reason: error,
+                                    },
+                                );
+                                return false;
+                            }
+                        }
+                    }
+                    // kryo.to's "Open in Kryoto Desktop", pressed inside the app.
+                    if url.scheme() == links::SCHEME {
+                        links::deliver(webview.app_handle(), url.as_str());
+                        return false;
                     }
                     let _ = webview.app_handle().emit(
                         "browser-error",
@@ -601,6 +729,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            links::take_pending_link,
             store_mount,
             store_visible,
             store_sign_out,
@@ -634,6 +763,7 @@ pub fn run() {
             downloads::download_remove,
             compat::compat_tools,
             addons::addon_undo,
+            online::online_check,
             online::online_apply,
             online::online_undo,
             storage::storage_overview,
@@ -699,9 +829,39 @@ mod tests {
     #[test]
     fn game_pages_give_their_slug() {
         let u = |s: &str| s.parse::<url::Url>().unwrap();
-        assert_eq!(game_slug(&u("https://kryo.to/game/captain-hardcore?download=1")).as_deref(), Some("captain-hardcore"));
-        assert_eq!(game_slug(&u("https://kryo.to/browse")), None);
-        assert_eq!(game_slug(&u("https://evil.example/game/x")), None);
+        let settings = settings::Settings::default();
+        assert_eq!(
+            game_slug(&u("https://kryo.to/game/captain-hardcore?download=1"), &settings).as_deref(),
+            Some("captain-hardcore")
+        );
+        assert_eq!(game_slug(&u("https://kryo.to/browse"), &settings), None);
+        assert_eq!(game_slug(&u("https://evil.example/game/x"), &settings), None);
+        // The canvas modal on the home and browse boards.
+        assert_eq!(game_slug(&u("https://kryo.to/?game=hades-ii"), &settings).as_deref(), Some("hades-ii"));
+        assert_eq!(game_slug(&u("https://kryo.to/browse?q=x&game=Hades-II"), &settings).as_deref(), Some("hades-ii"));
+        assert_eq!(game_slug(&u("https://kryo.to/?game=../x"), &settings), None);
+        assert_eq!(game_slug(&u("https://evil.example/?game=x"), &settings), None);
+    }
+
+    #[test]
+    fn canvas_download_context_carries_slug_and_title_without_changing_the_file_url() {
+        let mut url: url::Url =
+            "https://dl.kryo.to/d/signed#kryoto-game=chinese-street-food-legend&kryoto-title=Chinese+Street+Food+Legend"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            download_context(&url),
+            (Some("chinese-street-food-legend".into()), Some("Chinese Street Food Legend".into()))
+        );
+        url.set_fragment(None);
+        assert_eq!(url.as_str(), "https://dl.kryo.to/d/signed");
+    }
+
+    #[test]
+    fn production_catalog_links_map_to_custom_endpoint() {
+        let original: url::Url = "https://kryo.to/login?next=/".parse().unwrap();
+        let mapped = map_catalog_url(original, "http://localhost:3000").unwrap();
+        assert_eq!(mapped.as_str(), "http://localhost:3000/login?next=/");
     }
 
     #[test]

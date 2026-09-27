@@ -1,4 +1,5 @@
 import { call, on } from '@/lib/bridge'
+import { catalogApiUrl } from '@/lib/endpoint'
 
 /**
  * The Library: games on this PC and how each one starts.
@@ -60,7 +61,7 @@ export type KryoAddon = {
 }
 
 export async function fetchAddons(slug: string): Promise<KryoAddon[]> {
-  const res = await fetch(`https://kryo.to/api/games/${encodeURIComponent(slug)}/downloads`)
+  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}/downloads`))
   if (!res.ok) return []
   const json = (await res.json()) as { addons?: KryoAddon[] }
   return json.addons ?? []
@@ -107,6 +108,8 @@ export const library = {
   onState: (fn: (e: GameStateEvent) => void) => on<GameStateEvent>('game-state', fn),
   onChanged: (fn: () => void) => on<unknown>('library-changed', fn),
   addonUndo: (gameId: string, file: string) => call<LibraryGame>('addon_undo', { gameId, file }),
+  /** `null` when the game can use Kryoto Online, else why it cannot. */
+  onlineCheck: (gameId: string) => call<string | null>('online_check', { gameId }),
   onlineApply: (gameId: string) => call<LibraryGame>('online_apply', { gameId }),
   onlineUndo: (gameId: string) => call<LibraryGame>('online_undo', { gameId }),
 }
@@ -143,7 +146,7 @@ export function slugFrom(input: string): string | null {
  * (which says whether Wine needs DLL overrides).
  */
 export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
-  const res = await fetch(`https://kryo.to/api/games/${encodeURIComponent(slug)}`)
+  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}`))
   if (res.status === 404) throw new Error(`kryo.to has no game at /game/${slug}.`)
   if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
   const { game } = (await res.json()) as { game: Record<string, unknown> }
