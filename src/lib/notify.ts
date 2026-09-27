@@ -1,29 +1,18 @@
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
-import { isTauri } from '@/lib/bridge'
+import { call, isTauri } from '@/lib/bridge'
 
 /**
  * System notifications - the ones Windows and Linux show in the corner, like a
  * browser's. Used for kryo.to's own notifications as they arrive and for the
  * app's news (a game ready to play), so nothing is only in the app.
+ *
+ * Sent by the native side (`os_notify`), never through a plugin that patches
+ * `window.Notification`: the Store's pages must keep the browser's own, or
+ * Cloudflare's download check fails (see `system.rs`).
  */
-
-let allowed: boolean | null = null
-
-async function ready(): Promise<boolean> {
-  if (!isTauri()) return false
-  if (allowed !== null) return allowed
-  try {
-    allowed = (await isPermissionGranted()) || (await requestPermission()) === 'granted'
-  } catch {
-    allowed = false
-  }
-  return allowed
-}
-
 export async function notify(title: string, body?: string) {
-  if (!(await ready())) return
+  if (!isTauri()) return
   try {
-    sendNotification({ title, body })
+    await call('os_notify', { title, body: body ?? null })
   } catch {
     /* the system said no; the in-app list still has it */
   }

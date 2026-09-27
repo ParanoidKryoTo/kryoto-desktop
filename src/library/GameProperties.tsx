@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickPath } from '@/lib/pick'
 import { FolderOpen, Glasses, Play, Trash2 } from 'lucide-react'
 import { Button, Check, CommandLine, Modal, Panes, Section, inputCls } from '@/ui'
 import { CompatPicker } from '@/settings/CompatPicker'
@@ -117,7 +117,7 @@ export function GameProperties({
 
   async function browseExe() {
     if (!isTauri()) return
-    const picked = await open({ defaultPath: draft.installDir, multiple: false, filters: [{ name: 'Games', extensions: ['exe', 'bat'] }] })
+    const picked = await pickPath({ defaultPath: draft.installDir, extensions: ['exe', 'bat'] })
     if (typeof picked !== 'string') return
     const norm = picked.replace(/\\/g, '/')
     const root = draft.installDir.replace(/\\/g, '/').replace(/\/+$/, '')

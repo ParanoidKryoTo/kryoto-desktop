@@ -12,6 +12,8 @@ identifier = "allow-shell"
 description = "Everything the desktop shell calls: the Store view, the library, games, downloads and settings."
 commands.allow = [
   "store_mount",
+  "os_notify",
+  "pick_path",
   "store_visible",
   "store_sign_out",
   "store_mark_read",

@@ -539,8 +539,6 @@ pub fn run() {
         _ => None,
     };
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         .manage(library::Running::default())
         .manage(downloads::Downloads::new())
         .manage(storage::Moving::default())
@@ -649,6 +647,8 @@ pub fn run() {
             logging::logs_send,
             system::shell_ready,
             system::app_exit,
+            system::os_notify,
+            system::pick_path,
             system::popup_open,
             system::popup_payload,
             system::popup_ready,
@@ -681,6 +681,19 @@ mod tests {
             .filter(|c| !allowed.contains(&format!("\"{c}\"")))
             .collect();
         assert!(missing.is_empty(), "add to permissions/shell.toml: {missing:?}");
+    }
+
+    /// A plugin's page script runs in every frame of every web view, the Store's
+    /// kryo.to pages and Cloudflare's challenge frame included. The notification
+    /// plugin's replaced `window.Notification` and every download failed its
+    /// Turnstile check. A new plugin has to be checked for that first.
+    #[test]
+    fn no_plugin_touches_the_store_pages() {
+        let toml = include_str!("../Cargo.toml");
+        let plugins: Vec<&str> = toml.lines().filter(|l| l.trim_start().starts_with("tauri-plugin-")).collect();
+        let checked: [&str; 0] = []; // none yet
+        let unchecked: Vec<&&str> = plugins.iter().filter(|l| !checked.iter().any(|c| l.trim_start().starts_with(c))).collect();
+        assert!(unchecked.is_empty(), "check these add no page script, then list them here: {unchecked:?}");
     }
 
     #[test]

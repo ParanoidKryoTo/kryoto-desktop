@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickPath } from '@/lib/pick'
 import { FolderInput, FolderOpen, HardDrive, Plus, Star, Trash2 } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Dropdown, IconButton } from '@/ui'
 import { call, errorText, isTauri, on } from '@/lib/bridge'
@@ -103,7 +103,7 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
 
   const addFolder = async () => {
     if (!isTauri()) return run('add', () => call('storage_add_folder', { path: 'E:\\Kryoto Games' }))
-    const dir = await open({ directory: true, multiple: false, title: 'Add a library folder' })
+    const dir = await pickPath({ directory: true, title: 'Add a library folder' })
     if (typeof dir === 'string') await run('add', () => call('storage_add_folder', { path: dir }))
   }
 

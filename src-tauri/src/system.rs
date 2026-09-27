@@ -89,6 +89,74 @@ pub fn shell_ready(ready: bool) {
     SHELL_READY.store(ready, Ordering::SeqCst);
 }
 
+/// A system notification (the corner pop-up and the notification centre).
+///
+/// Sent from here and not through the notification plugin on purpose: that
+/// plugin swaps `window.Notification` for its own in every frame of every web
+/// view, the Store's pages and Cloudflare's challenge frame included, and
+/// Turnstile reads a replaced browser API as a tampered browser. Downloads then
+/// failed with "Could not verify this browser".
+#[tauri::command]
+pub fn os_notify(app: AppHandle, title: String, body: Option<String>) {
+    let mut note = notify_rust::Notification::new();
+    note.summary(&title);
+    if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+        note.body(&body);
+    }
+    note.auto_icon();
+    // Windows files a toast under the installed app's ID; a build run from
+    // `target/` has no shortcut carrying that ID, so it leaves the default.
+    #[cfg(windows)]
+    if !cfg!(debug_assertions) {
+        note.app_id(&app.config().identifier);
+    }
+    #[cfg(not(windows))]
+    let _ = &app;
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = note.show() {
+            crate::logging::error("notify", &e.to_string());
+        }
+    });
+}
+
+/// The system's file or folder picker, over the main window. Our own for the
+/// same reason as `os_notify`: the dialog plugin also swaps `alert` and
+/// `confirm` in every frame of the Store.
+#[tauri::command]
+pub async fn pick_path(
+    window: tauri::Window,
+    title: Option<String>,
+    directory: bool,
+    default_path: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let parent = window.clone();
+    // Built on the main thread (GTK insists), awaited off it.
+    window
+        .run_on_main_thread(move || {
+            let mut dialog = rfd::AsyncFileDialog::new().set_parent(&parent).set_can_create_directories(true);
+            if let Some(title) = title {
+                dialog = dialog.set_title(title);
+            }
+            if let Some(dir) = default_path.filter(|p| std::path::Path::new(p).is_dir()) {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(ext) = extensions.filter(|e| !e.is_empty()) {
+                let ext: Vec<&str> = ext.iter().map(String::as_str).collect();
+                dialog = dialog.add_filter("Games", &ext);
+            }
+            type Picked = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>;
+            let picked: Picked = if directory { Box::pin(dialog.pick_folder()) } else { Box::pin(dialog.pick_file()) };
+            std::thread::spawn(move || {
+                let path = tauri::async_runtime::block_on(picked).map(|h| h.path().display().to_string());
+                let _ = tx.send(path);
+            });
+        })
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "The picker closed unexpectedly.".to_string())
+}
+
 #[tauri::command]
 pub fn app_exit(app: AppHandle) {
     crate::logging::info("app", "exit");

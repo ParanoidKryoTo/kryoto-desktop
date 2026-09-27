@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { pickPath } from '@/lib/pick'
 import { ArrowLeft, Download, FolderOpen, Search } from 'lucide-react'
 import { AsciiBar, Button, Modal, Section, inputCls } from '@/ui'
 import { errorText, isTauri } from '@/lib/bridge'
@@ -85,13 +85,10 @@ export function AddGameDialog({
     setError(null)
     let picked: string | null
     if (isTauri()) {
-      const r = await open({
+      picked = await pickPath({
         title: found?.executable ? `Find ${found.executable}` : "Choose the game's .exe",
-        multiple: false,
-        directory: false,
-        filters: [{ name: 'Games', extensions: ['exe', 'bat'] }],
+        extensions: ['exe', 'bat'],
       })
-      picked = typeof r === 'string' ? r : null
     } else {
       picked = `C:\\Games\\${title || found?.title || 'Game'}\\${found?.executable || 'Game.exe'}`
     }
