@@ -1,0 +1,328 @@
+//! Kryoto Online, set up on this PC - the same thing Kryoto Forge does to a
+//! build, done to an installed game, and undone again.
+//!
+//! Beside every `steam_api(64).dll` in the game: Kryoto Online's proxy takes
+//! the dll's place (the original is kept next to it), its core (`kryotoO.dll`,
+//! or `kryotoO32.dll` for 32-bit) goes beside it, and `kryoto-online.ini` is
+//! written next to each exe and dll, telling it which game this is. A shipped
+//! `steam_appid.txt` is set aside, as Forge does - it would undo the spoof.
+//!
+//! Undo deletes what was added and puts every original back, so the game is
+//! exactly as it was. The files come from Kryoto Online's own releases on
+//! GitHub, fetched once and kept in the app's tools folder.
+
+use crate::library::{self, LibraryGame};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+const REPO: &str = "kyrotooooo/kryoto-online";
+/// What the game is told it is: Spacewar, which every Steam account owns.
+const SPACEWAR_APPID: &str = "480";
+const BACKUP_EXT: &str = "kryoto-original";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalOnline {
+    /// Kryoto Online's release, e.g. "v1.8.1".
+    pub version: String,
+    /// Files added, relative to the game's folder; deleted on undo.
+    pub added: Vec<String>,
+    /// Files replaced or set aside: (the file, its saved original).
+    pub saved: Vec<(String, String)>,
+    pub applied_at: u64,
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn rel(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
+}
+
+/// Every `steam_api.dll` / `steam_api64.dll` in the game, not under plugins.
+fn steam_dlls(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        for e in read.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if p.is_dir() {
+                if depth < 8 && name != "plugins" {
+                    stack.push((p, depth + 1));
+                }
+            } else if name == "steam_api64.dll" || name == "steam_api.dll" {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Folders an exe lives in, plus each dll's folder and the root: where the
+/// proxy might look for its ini, since there is no telling which exe runs.
+fn config_dirs(root: &Path, dlls: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = vec![root.to_path_buf()];
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        for e in read.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth < 8 {
+                    stack.push((p, depth + 1));
+                }
+            } else if e.file_name().to_string_lossy().to_ascii_lowercase().ends_with(".exe") {
+                dirs.push(dir.clone());
+            }
+        }
+    }
+    dirs.extend(dlls.iter().filter_map(|d| d.parent().map(Path::to_path_buf)));
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+pub fn ini(appid: &str) -> String {
+    format!(
+        "; Written by Kryoto Desktop. Delete to fall back to defaults.\n\
+         [Settings]\n\
+         AppId={SPACEWAR_APPID}\n\
+         ogAppId={appid}\n\
+         PluginsFolder=plugins\n\
+         GetStubbedLol=true\n\
+         UnlockDLC=\n\
+         EmulateTicket=true\n"
+    )
+}
+
+/// Kryoto Online's files, fetched once per release into the tools folder.
+async fn tools<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client) -> Result<(String, PathBuf), String> {
+    let base = app.path().app_data_dir().map_err(|e| e.to_string())?.join("tools").join("kryoto-online");
+    let release: serde_json::Value = client
+        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach GitHub for Kryoto Online: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("GitHub's answer about Kryoto Online was unreadable: {e}"))?;
+    let tag = release["tag_name"].as_str().ok_or("Kryoto Online has no release to use.")?.to_string();
+    let dir = base.join(&tag);
+    if dir.join("x64").join("steam_api64.dll").is_file() {
+        return Ok((tag, dir));
+    }
+    let url = release["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("kryoto-online") && n.ends_with("-release.zip")))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .ok_or("Kryoto Online's release has no download.")?
+        .to_string();
+    let bytes = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .bytes()
+        .await
+        .map_err(|e| format!("Downloading Kryoto Online failed: {e}"))?;
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let zip = base.join(format!("{tag}.zip"));
+    std::fs::write(&zip, &bytes).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::downloads::extract(&zip, &dir, &|_, _| {})?;
+    let _ = std::fs::remove_file(&zip);
+    // Some releases wrap everything in one folder.
+    if !dir.join("x64").is_dir() {
+        if let Some(inner) = crate::downloads::single_child_dir(&dir) {
+            crate::downloads::move_tree(&inner, &dir).map_err(|e| e.to_string())?;
+        }
+    }
+    if !dir.join("x64").join("steam_api64.dll").is_file() {
+        return Err("Kryoto Online's release is not laid out as expected (no x64/steam_api64.dll).".into());
+    }
+    Ok((tag, dir))
+}
+
+fn game_root<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame) -> PathBuf {
+    let folders = crate::settings::all_folders(&crate::settings::load(app));
+    crate::storage::game_folder(&folders, &game.install_dir).unwrap_or_else(|| PathBuf::from(&game.install_dir))
+}
+
+/// Put `from` at `to`, first saving whatever is at `to` beside it.
+fn place(root: &Path, from: &Path, to: &Path, rec: &mut LocalOnline) -> Result<(), String> {
+    if to.exists() {
+        let backup = PathBuf::from(format!("{}.{BACKUP_EXT}", to.display()));
+        if !backup.exists() {
+            std::fs::rename(to, &backup).map_err(|e| format!("Could not set aside {}: {e}", to.display()))?;
+        }
+        rec.saved.push((rel(root, to), rel(root, &backup)));
+    } else {
+        rec.added.push(rel(root, to));
+    }
+    std::fs::copy(from, to).map_err(|e| format!("Could not copy {}: {e}", to.display()))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn online_apply(app: AppHandle, game_id: String) -> Result<LibraryGame, String> {
+    let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
+    if game.online.is_some() {
+        return Err("Kryoto Online is already set up for this game.".into());
+    }
+    let slug = game.slug.clone().ok_or("Link the game to its kryo.to page first (Properties, kryo.to).")?;
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let appid = client
+        .get(format!("https://kryo.to/api/games/{slug}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?["game"]["steam_appid"]
+        .as_str()
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_digit()))
+        .map(String::from)
+        .ok_or("kryo.to has no Steam app id for this game, which Kryoto Online needs.")?;
+    let (version, tools) = tools(&app, &client).await?;
+    let root = game_root(&app, &game);
+
+    let rec = tauri::async_runtime::spawn_blocking(move || -> Result<LocalOnline, String> {
+        let dlls = steam_dlls(&root);
+        if dlls.is_empty() {
+            return Err("This game has no steam_api dll, so there is nothing for Kryoto Online to go into.".into());
+        }
+        let mut rec = LocalOnline { version, applied_at: now(), ..Default::default() };
+        let result = (|| -> Result<(), String> {
+            for dll in &dlls {
+                let is64 = dll.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("steam_api64.dll"));
+                let (arch, proxy, core) = if is64 { ("x64", "steam_api64.dll", "kryotoO.dll") } else { ("x86", "steam_api.dll", "kryotoO32.dll") };
+                let dir = dll.parent().unwrap_or(&root).to_path_buf();
+                place(&root, &tools.join(arch).join(proxy), dll, &mut rec)?;
+                place(&root, &tools.join(arch).join(core), &dir.join(core), &mut rec)?;
+                let appid_txt = dir.join("steam_appid.txt");
+                if appid_txt.exists() {
+                    let backup = PathBuf::from(format!("{}.{BACKUP_EXT}", appid_txt.display()));
+                    std::fs::rename(&appid_txt, &backup).map_err(|e| e.to_string())?;
+                    rec.saved.push((rel(&root, &appid_txt), rel(&root, &backup)));
+                }
+            }
+            let text = ini(&appid);
+            for dir in config_dirs(&root, &dlls) {
+                let path = dir.join("kryoto-online.ini");
+                if path.exists() {
+                    let backup = PathBuf::from(format!("{}.{BACKUP_EXT}", path.display()));
+                    if !backup.exists() {
+                        std::fs::rename(&path, &backup).map_err(|e| e.to_string())?;
+                    }
+                    rec.saved.push((rel(&root, &path), rel(&root, &backup)));
+                } else {
+                    rec.added.push(rel(&root, &path));
+                }
+                std::fs::write(&path, &text).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            // Half set up is worse than not at all: put it back.
+            undo_files(&root, &rec);
+            return Err(e);
+        }
+        Ok(rec)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    crate::logging::info("online", &format!("Kryoto Online {} set up for {}", rec.version, game.title));
+    let updated = library::update(&app, |games| {
+        let g = games.iter_mut().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
+        g.online = Some(rec.clone());
+        g.apply_overrides = true;
+        Ok(g.clone())
+    })?;
+    let _ = app.emit("library-changed", ());
+    Ok(updated)
+}
+
+fn undo_files(root: &Path, rec: &LocalOnline) {
+    for f in &rec.added {
+        if let Ok(p) = crate::launch::inside(root, f) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    for (file, backup) in &rec.saved {
+        if let (Ok(file), Ok(backup)) = (crate::launch::inside(root, file), crate::launch::inside(root, backup)) {
+            if backup.exists() {
+                let _ = std::fs::remove_file(&file);
+                let _ = std::fs::rename(&backup, &file);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn online_undo(app: AppHandle, game_id: String) -> Result<LibraryGame, String> {
+    let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
+    let rec = game.online.clone().ok_or("Kryoto Online is not set up for this game.")?;
+    undo_files(&game_root(&app, &game), &rec);
+    crate::logging::info("online", &format!("Kryoto Online removed from {}", game.title));
+    let updated = library::update(&app, |games| {
+        let g = games.iter_mut().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
+        g.online = None;
+        Ok(g.clone())
+    })?;
+    let _ = app.emit("library-changed", ());
+    Ok(updated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_up_then_undo_leaves_the_game_as_it_was() {
+        let base = std::env::temp_dir().join("kryoto-online-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("Game");
+        let tools = base.join("tools");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/steam_api64.dll"), "valve").unwrap();
+        std::fs::write(root.join("bin/steam_appid.txt"), "12345").unwrap();
+        std::fs::write(root.join("bin/Game.exe"), "exe").unwrap();
+        std::fs::create_dir_all(tools.join("x64")).unwrap();
+        std::fs::write(tools.join("x64/steam_api64.dll"), "proxy").unwrap();
+        std::fs::write(tools.join("x64/kryotoO.dll"), "core").unwrap();
+
+        let dll = root.join("bin/steam_api64.dll");
+        assert_eq!(steam_dlls(&root), vec![dll.clone()]);
+        let mut rec = LocalOnline::default();
+        place(&root, &tools.join("x64/steam_api64.dll"), &dll, &mut rec).unwrap();
+        place(&root, &tools.join("x64/kryotoO.dll"), &root.join("bin/kryotoO.dll"), &mut rec).unwrap();
+        std::fs::rename(root.join("bin/steam_appid.txt"), root.join("bin/steam_appid.txt.kryoto-original")).unwrap();
+        rec.saved.push(("bin/steam_appid.txt".into(), "bin/steam_appid.txt.kryoto-original".into()));
+        assert_eq!(std::fs::read_to_string(&dll).unwrap(), "proxy");
+        assert!(config_dirs(&root, &[dll.clone()]).contains(&root.join("bin")));
+
+        undo_files(&root, &rec);
+        assert_eq!(std::fs::read_to_string(&dll).unwrap(), "valve");
+        assert_eq!(std::fs::read_to_string(root.join("bin/steam_appid.txt")).unwrap(), "12345");
+        assert!(!root.join("bin/kryotoO.dll").exists());
+        assert!(!root.join("bin/steam_api64.dll.kryoto-original").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_ini_spoofs_spacewar_and_names_the_real_game() {
+        let t = ini("1190600");
+        assert!(t.contains("AppId=480\n") && t.contains("ogAppId=1190600\n") && t.contains("EmulateTicket=true"));
+    }
+}

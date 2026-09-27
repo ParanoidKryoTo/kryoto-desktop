@@ -68,13 +68,13 @@ const games = [
     ],
     source: 'Steam (DRM-free)',
     playtimeSeconds: 5400,
-    lastPlayed: now() - 3600 * 5,
+    lastPlayed: now() - 86400 * 4,
     short: 'A VR action game with a desktop mode behind -nohmd.',
     developer: 'AntiZero Games',
     nsfw: true,
     version: 'b20488383',
   }),
-  game(367520, 'Hollow Knight', { playtimeSeconds: 162000, lastPlayed: now() - 86400 * 2, source: 'Steam (DRM-free)' }),
+  game(367520, 'Hollow Knight', { playtimeSeconds: 162000, lastPlayed: now() - 3600 * 3, source: 'Steam (DRM-free)' }),
   game(504230, 'Celeste', { playtimeSeconds: 30000, lastPlayed: now() - 86400 * 9 }),
   game(1145360, 'Hades', { playtimeSeconds: 72000, lastPlayed: now() - 86400 * 30, source: 'Steam + Kryoto Online' }),
   game(413150, 'Stardew Valley', { playtimeSeconds: 0 }),
@@ -104,6 +104,8 @@ const settings: Record<string, unknown> = {
   startWithSystem: false,
   pressEffect: true,
   sharePlaytime: true,
+  connections: 8,
+  speedLimitMb: 0,
 }
 
 const GB = 1_073_741_824

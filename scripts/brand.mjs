@@ -75,7 +75,21 @@ function iconSvg(size) {
 </svg>`
 }
 
-const icon = (size) => sharp(Buffer.from(iconSvg(size))).png({ compressionLevel: 9 }).toBuffer()
+/**
+ * Taskbar and tray sizes (up to 48px) are drawn the way Forge's are: a black
+ * square edge to edge with the mark as big as it will go, rendered at 8x and
+ * brought down with a sharpening filter - small icons read on contrast, and a
+ * tile, a border or a screen outline only takes pixels away from the mark.
+ */
+async function smallIcon(size) {
+  const S = size * 8
+  const markW = S * 0.86
+  const k = markW / MARK_W
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}"><rect width="${S}" height="${S}" rx="${S * 0.12}" fill="#000"/><path transform="translate(${(S - markW) / 2} ${(S - MARK_H * k) / 2}) scale(${k})" d="${MARK_PATH}" fill="#fff"/></svg>`
+  return sharp(Buffer.from(svg)).resize(size, size, { kernel: 'lanczos3' }).sharpen({ sigma: 0.6 }).png({ compressionLevel: 9 }).toBuffer()
+}
+
+const icon = (size) => (size <= 48 ? smallIcon(size) : sharp(Buffer.from(iconSvg(size))).png({ compressionLevel: 9 }).toBuffer())
 const markArt = (width) =>
   sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${MARK_W} ${MARK_H}" width="${width}" height="${Math.round((MARK_H * width) / MARK_W)}"><path d="${MARK_PATH}" fill="${INK}"/></svg>`))
     .png()

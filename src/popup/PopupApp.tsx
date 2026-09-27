@@ -39,7 +39,9 @@ export function PopupApp() {
       if (cancelled || !box.current) return
       const r = box.current.getBoundingClientRect()
       void call('popup_ready', { width: Math.ceil(r.width) + POPUP_PAD * 2, height: Math.ceil(r.height) + POPUP_PAD * 2 })
-      box.current.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true })
+      // The menu itself takes focus, not its first item: nothing is lit until
+      // the pointer or an arrow key picks something.
+      box.current.focus({ preventScroll: true })
     })
     return () => {
       cancelled = true
@@ -55,7 +57,8 @@ export function PopupApp() {
       e.preventDefault()
       const items = [...(box.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])]
       const at = items.indexOf(document.activeElement as HTMLElement)
-      const next = items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]
+      const step = e.key === 'ArrowDown' ? 1 : -1
+      const next = at < 0 ? items[step > 0 ? 0 : items.length - 1] : items[(at + step + items.length) % items.length]
       next?.focus()
     }
     window.addEventListener('keydown', onKey)
@@ -64,14 +67,26 @@ export function PopupApp() {
 
   if (!payload) return null
   return (
+    // A see-through window: the menu is drawn with the reader's own corners,
+    // and its shadow falls into the padding around it.
     <div style={{ padding: POPUP_PAD }} className="w-fit">
       <div
         ref={box}
         key={seq}
         role="menu"
+        tabIndex={-1}
         onPointerEnter={() => void call('popup_hover', { inside: true })}
-        onPointerLeave={() => void call('popup_hover', { inside: false })}
-        className="kryo-pop kryo-radius w-max overflow-hidden border border-border bg-popover py-1 shadow-[0_8px_24px_rgba(0,0,0,0.55)]"
+        onPointerLeave={() => {
+          box.current?.focus({ preventScroll: true })
+          void call('popup_hover', { inside: false })
+        }}
+        // One item is lit at a time: the pointer moves focus, and focus is the
+        // only highlight - a hover style beside it lit two rows at once.
+        onPointerMove={(e) => {
+          const item = (e.target as HTMLElement).closest<HTMLElement>('[role="menuitem"]:not(:disabled)')
+          if (item && document.activeElement !== item) item.focus({ preventScroll: true })
+        }}
+        className="kryo-pop kryo-radius grid w-max gap-0.5 overflow-hidden border border-border bg-popover p-1 shadow-[0_6px_20px_rgba(0,0,0,0.5)] outline-none"
         style={payload.kind === 'menu' ? { minWidth: payload.minWidth ?? 200 } : { width: 320 }}
       >
         {payload.kind === 'menu' ? <Items items={payload.items} onSelect={select} /> : <InboxList payload={payload} onSelect={select} />}
@@ -85,7 +100,7 @@ function Items({ items, onSelect }: { items: PopupItem[]; onSelect: (id: string)
     <>
       {items.map((item, i) =>
         'separator' in item ? (
-          <div key={i} className="my-1 h-px bg-border" />
+          <div key={i} className="mx-2 my-1 h-px bg-border" />
         ) : 'heading' in item ? (
           <div key={i} className="px-3 pb-1 pt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
             {item.heading}
@@ -98,10 +113,10 @@ function Items({ items, onSelect }: { items: PopupItem[]; onSelect: (id: string)
             disabled={item.disabled}
             onClick={() => onSelect(item.id)}
             className={cn(
-              'kryo-square flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs outline-none transition-colors disabled:opacity-40',
+              'flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs outline-none transition-colors disabled:opacity-40',
               item.danger
-                ? 'text-destructive hover:bg-destructive hover:text-destructive-foreground focus:bg-destructive focus:text-destructive-foreground'
-                : 'text-foreground hover:bg-primary hover:text-primary-foreground focus:bg-primary focus:text-primary-foreground',
+                ? 'text-destructive focus:bg-destructive focus:text-destructive-foreground'
+                : 'text-foreground focus:bg-primary focus:text-primary-foreground',
             )}
           >
             <span
@@ -130,7 +145,7 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
           <button
             type="button"
             role="menuitem"
-            className="kryo-square text-[10px] uppercase tracking-wider text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
+            className="kryo-square text-[10px] uppercase tracking-wider text-muted-foreground outline-none focus:text-foreground"
             onClick={() => onSelect(`${menu}:read`)}
           >
             Mark all read
@@ -146,7 +161,7 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
             type="button"
             role="menuitem"
             onClick={() => onSelect(`${menu}:open:${i}`)}
-            className="kryo-square flex w-full gap-2.5 px-3 py-2 text-left outline-none transition-colors hover:bg-secondary focus:bg-secondary"
+            className="flex w-full gap-2.5 px-3 py-2 text-left outline-none transition-colors focus:bg-secondary"
           >
             <span className={cn('mt-1.5 size-1.5 shrink-0 rounded-full', n.readAt ? 'bg-transparent' : 'bg-primary')} />
             <span className="min-w-0">
@@ -160,7 +175,7 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
         <button
           type="button"
           role="menuitem"
-          className="kryo-square w-full px-3 py-2 text-left text-[10px] uppercase tracking-wider text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
+          className="kryo-square w-full px-3 py-2 text-left text-[10px] uppercase tracking-wider text-muted-foreground outline-none focus:text-foreground"
           onClick={() => onSelect(`${menu}:all`)}
         >
           See all

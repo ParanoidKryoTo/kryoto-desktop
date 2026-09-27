@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { FolderOpen, Glasses, Play, Trash2 } from 'lucide-react'
 import { Button, Check, CommandLine, Modal, Panes, Section, inputCls } from '@/ui'
+import { CompatPicker } from '@/settings/CompatPicker'
 import { errorText, isTauri } from '@/lib/bridge'
 import { formatBytes } from '@/lib/downloads'
 import {
@@ -14,7 +15,6 @@ import {
   library,
   presetFor,
   slugFrom,
-  steamLine,
   type LibraryGame,
 } from '@/lib/library'
 import { cn } from '@/lib/utils'
@@ -23,17 +23,16 @@ type Tab = 'general' | 'compat' | 'files' | 'kryoto'
 
 const TABS = [
   ['general', 'General'],
-  ['compat', 'Compatibility'],
+  ...(isWindowsHost() ? [] : ([['compat', 'Compatibility']] as const)),
   ['files', 'Installed files'],
   ['kryoto', 'kryo.to'],
-] as const
+] as const as readonly (readonly [Tab, string])[]
 
 /**
  * A game's Properties, in Steam's places:
  *   General          name, which way Play starts, the LAUNCH OPTIONS line and
  *                    the exact command it adds up to
- *   Compatibility    Wine or Proton off Windows; on Windows, the recipe for
- *                    playing it through Steam instead
+ *   Compatibility    Linux only: force a Proton or Wine for this game
  *   Installed files  size, folder, exe, uninstall
  *   kryo.to          the page it is linked to, refreshed from there
  * Edits a draft; Save writes it, closing is always cancel.
@@ -129,12 +128,6 @@ export function GameProperties({
     }
   }
 
-  async function browseTool() {
-    if (!isTauri()) return
-    const picked = await open({ multiple: false, title: 'Choose wine, or the "proton" script in a Proton folder' })
-    if (typeof picked === 'string') set('compatTool', picked)
-  }
-
   const windows = isWindowsHost()
   const preset = presetFor(draft.source)
 
@@ -160,6 +153,7 @@ export function GameProperties({
       title={game.title}
       onClose={onClose}
       wide
+      fill
       footer={
         <>
           {error ? <p className="grow text-xs text-destructive">{error}</p> : <span className="grow" />}
@@ -219,6 +213,7 @@ export function GameProperties({
                 onChange={(e) => set('launchOptions', e.target.value)}
                 className="kryo-ascii-art kryo-radius min-h-16 w-full resize-y border border-border bg-background p-3 text-xs text-foreground outline-none focus:border-foreground"
               />
+              {!windows ? (
               <div className="flex flex-wrap gap-2">
                 {PRESETS.map((p) => (
                   <Button key={p.id} size="sm" title={p.line} onClick={() => set('launchOptions', p.line)}>
@@ -232,8 +227,6 @@ export function GameProperties({
                   </Button>
                 ) : null}
               </div>
-              {windows && /WINEDLLOVERRIDES/.test(draft.launchOptions) ? (
-                <p className="text-[11px] text-muted-foreground">WINEDLLOVERRIDES only matters under Wine or Proton. Windows ignores it.</p>
               ) : null}
             </Section>
             <Section title="Play runs">
@@ -244,52 +237,21 @@ export function GameProperties({
 
         {tab === 'compat' ? (
           <>
-            {windows ? (
-              <Section title="Windows">
-                <p className="text-xs text-muted-foreground">Windows runs these games as they are. Nothing to set here.</p>
-              </Section>
+            <Check
+              checked={draft.compatTool != null}
+              onChange={(v) => set('compatTool', v ? (draft.compatTool ?? '') : null)}
+              label="Force the use of a specific compatibility tool"
+            />
+            {draft.compatTool != null ? (
+              <CompatPicker value={draft.compatTool || null} onChange={(v) => set('compatTool', v ?? '')} autoLabel="The default" />
             ) : (
-              <>
-                <Section
-                  title="Force a compatibility tool"
-                  hint="Every build on kryo.to is for Windows. Pick wine, or the proton script inside a Proton folder (Proton Experimental, GE-Proton). Each game gets its own prefix. Empty uses the one in Settings."
-                >
-                  <div className="flex gap-2">
-                    <input
-                      className={inputCls}
-                      value={draft.compatTool ?? ''}
-                      placeholder="/usr/bin/wine"
-                      onChange={(e) => set('compatTool', e.target.value || null)}
-                    />
-                    <Button onClick={() => void browseTool()}>Browse</Button>
-                  </div>
-                </Section>
-                <Check
-                  checked={draft.applyOverrides}
-                  onChange={(v) => set('applyOverrides', v)}
-                  label={preset ? `Add the ${preset.label} DLL overrides this release needs` : "Add the DLL overrides a release's online layer needs"}
-                />
-              </>
+              <p className="text-xs text-muted-foreground">Uses the one in Settings, Compatibility.</p>
             )}
-            <Section title="Playing through Steam instead (Linux, Steam Deck)">
-              <ol className="grid list-decimal gap-2.5 pl-5 text-xs leading-relaxed text-muted-foreground">
-                <li>
-                  In Steam: <b className="text-foreground">Games</b>, then <b className="text-foreground">Add a Non-Steam Game to My Library</b>, and pick{' '}
-                  {draft.executable || "the game's .exe"}.
-                </li>
-                <li className="grid gap-2">
-                  <span>
-                    Right-click it, <b className="text-foreground">Properties</b>, and paste this into LAUNCH OPTIONS on the Shortcut tab:
-                  </span>
-                  <CommandLine text={steamLine(draft, previewEntry)} />
-                </li>
-                <li>
-                  On the <b className="text-foreground">Compatibility</b> tab, tick{' '}
-                  <b className="text-foreground">Force the use of a specific Steam Play compatibility tool</b> and pick a Proton version.
-                </li>
-                <li>Press Play.</li>
-              </ol>
-            </Section>
+            <Check
+              checked={draft.applyOverrides}
+              onChange={(v) => set('applyOverrides', v)}
+              label={preset ? `Load the ${preset.label} files this release needs` : "Load the files this release's online layer needs"}
+            />
           </>
         ) : null}
 

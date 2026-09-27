@@ -338,29 +338,45 @@
   --sidebar-foreground: oklch(0.93 0.08 350);
   --sidebar-border: oklch(0.27 0.05 350);
 }
-/* The pop-up menu window and the boot box draw on a transparent window: the
-   page itself is see-through and only the menu (or the box) is painted. */
-html[data-window='popup'],
-html[data-window='popup'] body,
-html[data-shape='box'],
-html[data-shape='box'] body {
-  background: transparent;
-}
+
+/* The pop-up menu's page is only as tall as its menu. */
 html[data-window='popup'] #root {
   height: auto;
 }
 
-/* Buttons give under the pointer, as on kryo.to (its `active:scale-[0.97]`).
-   Settings > Interface can turn it off (`data-press='off'`). Unlayered, so it
-   applies to every button without each one opting in. */
-button,
-[role='button'] {
-  transition-property: color, background-color, border-color, opacity, box-shadow, transform;
+/* A real button gives under the pointer, as on kryo.to (its
+   active:scale-[0.97]): Button and IconButton opt in with kryo-press.
+   Not rows, checkboxes, cards or art - only things drawn as buttons. Reduced
+   motion (the account's, or the system's) keeps them still. */
+@utility kryo-press {
+  transition-property: color, background-color, border-color, opacity, transform;
   transition-duration: var(--kryo-dur-fast);
   transition-timing-function: var(--kryo-ease-out);
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+    transition-duration: 60ms;
+  }
 }
-html:not([data-press='off']) button:not(:disabled):not([role='menuitem']):not([role='option']):not(.kryo-no-press):active,
-html:not([data-press='off']) [role='button']:not([aria-disabled='true']):active {
-  transform: scale(0.97);
-  transition-duration: 60ms;
+html[data-motion='reduced'] .kryo-press:active {
+  transform: none;
+}
+html[data-motion='reduced'] *,
+html[data-motion='reduced'] *::before,
+html[data-motion='reduced'] *::after {
+  animation-duration: 0.01ms !important;
+  transition-duration: 0.01ms !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kryo-press:active {
+    transform: none;
+  }
+}
+
+html[data-window='popup'],
+html[data-window='popup'] body {
+  background: transparent;
+}
+/* Menu rows follow the reader's corners, up to a size that still reads as a row. */
+html[data-window='popup'] [role='menuitem'] {
+  border-radius: min(var(--kryo-radius), 10px);
 }

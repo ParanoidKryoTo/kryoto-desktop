@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bell, Download, HardDrive, Heart, LogOut, Monitor, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
-import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
+import { Bell, Download, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
+import { AsciiBar, Button, Caption, Check, Section, Segmented } from '@/ui'
 import { errorText } from '@/lib/bridge'
-import { PALETTES, RADII, settingsApi, useSettings, type Settings } from '@/lib/settings'
+import { settingsApi, useSettings, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, catalogUrl, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
 import { StoragePane } from '@/settings/StoragePane'
+import { CompatPicker } from '@/settings/CompatPicker'
 import { LogsPane } from '@/settings/LogsPane'
 
 /**
@@ -27,10 +28,9 @@ export type SettingsSection =
   | 'notifications'
   | 'security'
   | 'support'
-  | 'interface'
+  | 'general'
   | 'storage'
   | 'downloads'
-  | 'system'
   | 'compat'
   | 'logs'
 
@@ -68,10 +68,9 @@ export function SettingsPage({
     { id: 'support', label: 'Support', icon: <Heart /> },
   ]
   const desktop: RailItem[] = [
-    { id: 'interface', label: 'Interface', icon: <SlidersHorizontal /> },
+    { id: 'general', label: 'General', icon: <SlidersHorizontal /> },
     { id: 'storage', label: 'Storage', icon: <HardDrive /> },
     { id: 'downloads', label: 'Downloads', icon: <Download /> },
-    { id: 'system', label: isWindowsHost() ? 'Windows' : 'System', icon: <Monitor /> },
     ...(isWindowsHost() ? [] : [{ id: 'compat' as const, label: 'Compatibility', icon: <Wrench /> }]),
     { id: 'logs', label: 'Logs', icon: <ScrollText /> },
   ]
@@ -206,12 +205,10 @@ function DesktopPane({ section }: { section: SettingsSection }) {
   }
 
   if (!s) return <div className="grid place-items-center"><AsciiBar fraction={null} cells={16} showPct={false} /></div>
-  const following = s.followAccount
   const title: Record<string, string> = {
-    interface: 'Interface',
+    general: 'General',
     storage: 'Storage',
     downloads: 'Downloads',
-    system: isWindowsHost() ? 'Windows' : 'System',
     compat: 'Compatibility',
     logs: 'Logs',
   }
@@ -226,55 +223,29 @@ function DesktopPane({ section }: { section: SettingsSection }) {
           </span>
         </header>
 
-        {section === 'interface' ? (
-          <>
-            <Section title="Look" hint={following ? 'Palette, corners, typeface and the adult blur follow Appearance in your kryo.to account.' : undefined}>
-              <Check checked={following} onChange={(v) => set('followAccount', v)} label="Match my kryo.to account" />
-            </Section>
-            {!following ? (
-              <>
-                <Section title="Palette">
-                  <div className="grid grid-cols-4 gap-2">
-                    {PALETTES.map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={s.palette === p.id}
-                        onClick={() => set('palette', p.id)}
-                        data-palette={p.id}
-                        className={cn('grid gap-2 border bg-background p-3 text-left', s.palette === p.id ? 'border-foreground' : 'border-border hover:border-foreground/50')}
-                      >
-                        <span className="flex gap-1">
-                          {['bg-background', 'bg-card', 'bg-secondary', 'bg-primary'].map((c) => (
-                            <span key={c} className={`size-4 rounded-full border border-border ${c}`} />
-                          ))}
-                        </span>
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-foreground">{p.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                </Section>
-                <Section title="Corners">
-                  <Segmented value={s.radius} options={RADII} onChange={(v) => set('radius', v)} />
-                </Section>
-                <Section title="Typeface">
-                  <Segmented value={s.font} options={[{ value: 'teletext', label: 'Teletext' }, { value: 'mono', label: 'Mono' }]} onChange={(v) => set('font', v)} />
-                </Section>
-                <Check checked={s.showAdult} onChange={(v) => set('showAdult', v)} label="Show adult games' art unblurred" />
-              </>
-            ) : null}
-            <Section title="Feel">
-              <Check checked={s.pressEffect} onChange={(v) => set('pressEffect', v)} label="Buttons press in when clicked" />
-            </Section>
-            <Section title="Open on">
-              <Segmented value={s.startPage} options={[{ value: 'library', label: 'Library' }, { value: 'store', label: 'Store' }]} onChange={(v) => set('startPage', v)} />
-            </Section>
-          </>
-        ) : null}
         {section === 'storage' ? <StoragePane onChanged={() => void settingsApi.get().then((v) => setS((cur) => (cur ? { ...cur, libraryDir: v.libraryDir, libraryFolders: v.libraryFolders } : v)))} /> : null}
         {section === 'downloads' ? (
           <>
+            <Section title="Connections" hint="More connections download faster on most lines. One is the slow, careful way.">
+              <Segmented
+                value={String(s.connections)}
+                options={['1', '4', '8', '16'].map((v) => ({ value: v, label: v }))}
+                onChange={(v) => set('connections', Number(v))}
+              />
+            </Section>
+            <Section title="Speed limit">
+              <Segmented
+                value={String(s.speedLimitMb)}
+                options={[
+                  { value: '0', label: 'None' },
+                  { value: '5', label: '5 MB/s' },
+                  { value: '10', label: '10 MB/s' },
+                  { value: '25', label: '25 MB/s' },
+                  { value: '50', label: '50 MB/s' },
+                ]}
+                onChange={(v) => set('speedLimitMb', Number(v))}
+              />
+            </Section>
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
             <Check checked={s.notifyDownloads} onChange={(v) => set('notifyDownloads', v)} label="Tell me when a game is ready to play" />
             <Section title="New games install to" hint="Change it, or add folders on other drives, in Storage.">
@@ -282,8 +253,11 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             </Section>
           </>
         ) : null}
-        {section === 'system' ? (
+        {section === 'general' ? (
           <>
+            <Section title="Open on">
+              <Segmented value={s.startPage} options={[{ value: 'library', label: 'Library' }, { value: 'store', label: 'Store' }]} onChange={(v) => set('startPage', v)} />
+            </Section>
             <Check checked={s.closeToTray} onChange={(v) => set('closeToTray', v)} label="Closing the window keeps Kryoto running in the tray" />
             <Check checked={s.startWithSystem} onChange={(v) => set('startWithSystem', v)} label={`Start Kryoto when I sign in to ${isWindowsHost() ? 'Windows' : 'my computer'}`} />
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
@@ -293,8 +267,8 @@ function DesktopPane({ section }: { section: SettingsSection }) {
           </>
         ) : null}
         {section === 'compat' ? (
-          <Section title="Default compatibility tool" hint="For every game that has not picked its own in Properties: wine, or the proton script inside a Proton folder.">
-            <input className={inputCls} value={s.defaultCompatTool ?? ''} placeholder="/usr/bin/wine" onChange={(e) => set('defaultCompatTool', e.target.value || null)} />
+          <Section title="Run Windows games with" hint="Games can pick their own under Properties, Compatibility.">
+            <CompatPicker value={s.defaultCompatTool} onChange={(v) => set('defaultCompatTool', v)} />
           </Section>
         ) : null}
         {section === 'logs' ? <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} /> : null}

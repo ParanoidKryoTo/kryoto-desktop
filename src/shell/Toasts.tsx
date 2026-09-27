@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Bell, Play } from 'lucide-react'
 import { on } from '@/lib/bridge'
 import type { Notice } from '@/lib/downloads'
+import { notify } from '@/lib/notify'
 
 export type Toast = Notice & { key: number }
 
@@ -17,7 +18,12 @@ export function useToasts() {
   useEffect(() => {
     let stop: (() => void) | undefined
     let cancelled = false
-    void on<Notice>('notify', push).then((fn) => (cancelled ? fn() : (stop = fn)))
+    // The app's news (a game ready to play, an add-on applied): in the app,
+    // and from the system too when the window is not in front.
+    void on<Notice>('notify', (n) => {
+      push(n)
+      if (!document.hasFocus()) void notify(n.title, n.body)
+    }).then((fn) => (cancelled ? fn() : (stop = fn)))
     return () => {
       cancelled = true
       stop?.()

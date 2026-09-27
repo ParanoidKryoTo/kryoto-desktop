@@ -39,7 +39,7 @@ export function Button({ variant = 'outline', size = 'md', className, ...rest }:
       type="button"
       {...rest}
       className={cn(
-        'kryo-pill inline-flex shrink-0 items-center justify-center gap-2 font-bold uppercase tracking-wider transition-colors duration-150 disabled:opacity-40',
+        'kryo-pill kryo-press inline-flex shrink-0 items-center justify-center gap-2 font-bold uppercase tracking-wider disabled:opacity-40',
         size === 'sm' && 'h-7 px-3 text-[10px]',
         size === 'md' && 'h-9 px-4 text-[11px]',
         size === 'lg' && 'h-12 px-8 text-sm tracking-[0.2em]',
@@ -69,7 +69,7 @@ export function IconButton({
       title={label}
       {...rest}
       className={cn(
-        'kryo-pill inline-grid size-8 shrink-0 place-items-center border border-border text-muted-foreground transition-colors hover:border-foreground hover:text-foreground disabled:opacity-30',
+        'kryo-pill kryo-press inline-grid size-8 shrink-0 place-items-center border border-border text-muted-foreground hover:border-foreground hover:text-foreground disabled:opacity-30',
         className,
       )}
     >
@@ -90,12 +90,15 @@ export function Modal({
   children,
   footer,
   wide = false,
+  fill = false,
 }: {
   title: string
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
   wide?: boolean
+  /** The body is one pane that fills the dialog (a `Panes` layout). */
+  fill?: boolean
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -122,7 +125,9 @@ export function Modal({
             <X className="size-3.5" />
           </IconButton>
         </header>
-        <div className="grid min-h-0 content-start gap-4 overflow-auto p-5">{children}</div>
+        <div className={cn('grid min-h-0 p-5', fill ? 'grid-rows-[minmax(0,1fr)] overflow-hidden' : 'content-start gap-4 overflow-auto')}>
+          {children}
+        </div>
         {footer ? (
           <footer className="flex items-center justify-end gap-2 border-t border-border bg-background/40 px-5 py-3">
             {footer}

@@ -1,47 +1,53 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
-import { FolderOpen } from 'lucide-react'
+import { ArrowLeft, Download, FolderOpen, Search } from 'lucide-react'
 import { AsciiBar, Button, Modal, Section, inputCls } from '@/ui'
 import { errorText, isTauri } from '@/lib/bridge'
 import { fetchCatalogGame, library, slugFrom, type CatalogGame, type LibraryGame } from '@/lib/library'
+import { adultBlur, useShowAdult } from '@/lib/adult'
+import { cn } from '@/lib/utils'
+
+type Hit = { slug: string; title: string; developer: string | null; year: number | null; cover_vertical: string | null; cover: string | null; nsfw: boolean }
+
+async function search(q: string): Promise<Hit[]> {
+  const res = await fetch(`https://kryo.to/api/games/search?q=${encodeURIComponent(q)}&limit=6`)
+  if (!res.ok) return []
+  return ((await res.json()) as { results?: Hit[] }).results ?? []
+}
 
 /**
- * Add a game already on this PC - Steam's "Add a Non-Steam Game", with one
- * step Steam does not have: link its kryo.to page and it arrives with its art,
- * the release's launch settings and every way Steam starts it.
+ * Add a game: find it on kryo.to, then either point at the copy already on
+ * this PC or go and download it. A game kryo.to does not have can still be
+ * added from its .exe.
  */
 export function AddGameDialog({
   initialSlug,
   onAdded,
+  onDownload,
   onClose,
 }: {
   initialSlug: string | null
   onAdded: (game: LibraryGame) => void
+  onDownload: (slug: string) => void
   onClose: () => void
 }) {
-  const [page, setPage] = useState(initialSlug ? `kryo.to/game/${initialSlug}` : '')
+  const showAdult = useShowAdult()
+  const [query, setQuery] = useState('')
+  const [hits, setHits] = useState<Hit[] | null>(null)
   const [found, setFound] = useState<CatalogGame | null>(null)
-  const [looking, setLooking] = useState(false)
+  const [manual, setManual] = useState(false)
   const [title, setTitle] = useState('')
-  const [error, setError] = useState<string | null>(null)
+  const [looking, setLooking] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const input = useRef<HTMLInputElement | null>(null)
 
-  async function lookUp(text: string) {
-    const slug = slugFrom(text)
-    setError(null)
-    if (!slug) {
-      setFound(null)
-      if (text.trim()) setError('Paste a kryo.to game link, like kryo.to/game/captain-hardcore.')
-      return
-    }
-    if (found?.slug === slug) return
+  async function pick(slug: string) {
     setLooking(true)
+    setError(null)
     try {
-      const game = await fetchCatalogGame(slug)
-      setFound(game)
-      setTitle(game.title)
+      setFound(await fetchCatalogGame(slug))
     } catch (e) {
-      setFound(null)
       setError(errorText(e))
     } finally {
       setLooking(false)
@@ -49,9 +55,31 @@ export function AddGameDialog({
   }
 
   useEffect(() => {
-    if (initialSlug) void lookUp(initialSlug)
+    if (initialSlug) void pick(initialSlug)
+    else input.current?.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Type to search; a pasted kryo.to link goes straight to the game.
+  useEffect(() => {
+    const q = query.trim()
+    const slug = slugFrom(q)
+    if (slug && /kryo\.to\/game\//.test(q)) {
+      void pick(slug)
+      return
+    }
+    if (q.length < 2) return setHits(null)
+    let cancelled = false
+    const t = window.setTimeout(() => {
+      void search(q)
+        .then((h) => !cancelled && setHits(h))
+        .catch(() => !cancelled && setHits([]))
+    }, 180)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [query])
 
   async function chooseExe() {
     setError(null)
@@ -72,7 +100,7 @@ export function AddGameDialog({
     try {
       onAdded(
         await library.add(picked, {
-          title: title.trim() || found?.title || '',
+          title: found?.title ?? title.trim(),
           slug: found?.slug ?? null,
           cover: found?.cover ?? null,
           hero: found?.hero ?? null,
@@ -93,60 +121,128 @@ export function AddGameDialog({
     }
   }
 
+  const back = () => {
+    setFound(null)
+    setManual(false)
+    setError(null)
+    requestAnimationFrame(() => input.current?.focus())
+  }
+
   return (
-    <Modal
-      title="Add a game"
-      onClose={onClose}
-      footer={
+    <Modal title="Add a game" onClose={onClose}>
+      {found ? (
         <>
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="primary" disabled={busy || looking} onClick={() => void chooseExe()}>
-            <FolderOpen className="size-3.5" />
-            {busy ? 'Adding' : 'Find the .exe'}
+          <div className="flex gap-4">
+            {found.cover ? (
+              <img
+                src={found.cover}
+                alt=""
+                className={cn('w-20 shrink-0 object-cover', adultBlur(found.nsfw, showAdult))}
+                style={{ aspectRatio: '2 / 3', borderRadius: 'min(var(--kryo-radius), 8px)' }}
+              />
+            ) : null}
+            <div className="grid content-center gap-1">
+              <b className="text-base text-foreground">{found.title}</b>
+              {found.developer ? <span className="text-xs text-muted-foreground">{found.developer}</span> : null}
+              {found.executable ? <span className="text-[11px] text-muted-foreground">Starts {found.executable}</span> : null}
+            </div>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Choice icon={<FolderOpen />} title="It's on this PC" body={found.executable ? `Point at ${found.executable}.` : 'Point at its .exe.'} disabled={busy} onClick={() => void chooseExe()} />
+            <Choice icon={<Download />} title="Download it" body="Opens its page in the store." onClick={() => onDownload(found.slug)} />
+          </div>
+          <Button variant="ghost" size="sm" className="w-fit" onClick={back}>
+            <ArrowLeft className="size-3" />
+            Another game
           </Button>
         </>
-      }
-    >
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        For a game already on this PC. Games you download from the store add themselves when they finish installing.
-      </p>
-      <Section title="kryo.to page (optional)">
-        <input
-          className={inputCls}
-          value={page}
-          placeholder="kryo.to/game/captain-hardcore"
-          onChange={(e) => setPage(e.target.value)}
-          onBlur={() => void lookUp(page)}
-          onKeyDown={(e) => e.key === 'Enter' && void lookUp(page)}
-        />
-      </Section>
-      {looking ? <AsciiBar fraction={null} cells={20} /> : null}
-      {found ? (
-        <div className="kryo-radius flex gap-4 border border-border p-3">
-          {found.cover ? (
-            <img src={found.cover} alt="" className="w-16 shrink-0 object-cover" style={{ aspectRatio: '2 / 3', borderRadius: 'min(var(--kryo-radius), 8px)' }} />
-          ) : null}
-          <div className="grid content-center gap-1">
-            <b className="text-sm text-foreground">{found.title}</b>
-            <span className="text-[11px] text-muted-foreground">
-              {found.executable ? `Starts ${found.executable}. ` : ''}
-              {found.entries.length > 1 ? `${found.entries.length} ways to play - you pick when you press Play.` : ''}
-            </span>
+      ) : manual ? (
+        <>
+          <Section title="Name">
+            <input className={inputCls} value={title} autoFocus placeholder="Taken from the .exe when empty" onChange={(e) => setTitle(e.target.value)} />
+          </Section>
+          <div className="flex gap-2">
+            <Button variant="primary" disabled={busy} onClick={() => void chooseExe()}>
+              <FolderOpen className="size-3.5" />
+              {busy ? 'Adding' : 'Find the .exe'}
+            </Button>
+            <Button variant="ghost" onClick={back}>
+              Back
+            </Button>
           </div>
-        </div>
+        </>
       ) : (
-        <Section title="Name">
-          <input className={inputCls} value={title} placeholder="Taken from the .exe when empty" onChange={(e) => setTitle(e.target.value)} />
-        </Section>
+        <>
+          <label className="kryo-pill flex h-10 items-center gap-2 border border-border bg-background px-4 text-muted-foreground focus-within:border-foreground">
+            <Search className="size-4 shrink-0" />
+            <input
+              ref={input}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search kryo.to"
+              aria-label="Search kryo.to"
+              className="kryo-square min-w-0 grow bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            />
+          </label>
+          {looking ? <AsciiBar fraction={null} cells={18} showPct={false} className="text-muted-foreground" /> : null}
+          {hits && hits.length ? (
+            <ul className="grid gap-1">
+              {hits.map((h) => (
+                <li key={h.slug}>
+                  <button
+                    type="button"
+                    onClick={() => void pick(h.slug)}
+                    className="kryo-radius flex w-full items-center gap-3 p-2 text-left hover:bg-secondary"
+                  >
+                    {h.cover_vertical || h.cover ? (
+                      <img
+                        src={(h.cover_vertical || h.cover)!}
+                        alt=""
+                        className={cn('h-12 w-8 shrink-0 object-cover', adultBlur(h.nsfw, showAdult))}
+                        style={{ borderRadius: 'min(var(--kryo-radius), 4px)' }}
+                      />
+                    ) : (
+                      <span className="h-12 w-8 shrink-0 bg-secondary" />
+                    )}
+                    <span className="grid min-w-0">
+                      <span className="truncate text-sm text-foreground">{h.title}</span>
+                      <span className="truncate text-[11px] text-muted-foreground">{[h.developer, h.year].filter(Boolean).join(' · ')}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : hits ? (
+            <p className="text-xs text-muted-foreground">Nothing on kryo.to by that name.</p>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              setManual(true)
+              setTitle(query.trim())
+            }}
+            className="kryo-square w-fit text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            Not on kryo.to? Add any .exe
+          </button>
+        </>
       )}
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
-        {found?.executable
-          ? `Pick ${found.executable} in the folder you extracted. The folder around it becomes the game's folder.`
-          : "Pick the .exe you start the game with. Its folder becomes the game's folder."}
-      </p>
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </Modal>
+  )
+}
+
+function Choice({ icon, title, body, onClick, disabled }: { icon: React.ReactNode; title: string; body: string; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className="kryo-radius kryo-press grid gap-1.5 border border-border p-4 text-left hover:border-foreground disabled:opacity-40 [&>svg]:size-5"
+    >
+      {icon}
+      <b className="text-sm text-foreground">{title}</b>
+      <span className="text-xs text-muted-foreground">{body}</span>
+    </button>
   )
 }

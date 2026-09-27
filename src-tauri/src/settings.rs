@@ -43,6 +43,10 @@ pub struct Settings {
     pub press_effect: bool,
     /// Add play time to the account on kryo.to (community statistics).
     pub share_playtime: bool,
+    /// Parallel connections per download (1 = one stream).
+    pub connections: u32,
+    /// Download speed cap in MB/s; 0 is no cap.
+    pub speed_limit_mb: u32,
 }
 
 impl Default for Settings {
@@ -65,6 +69,8 @@ impl Default for Settings {
             start_with_system: false,
             press_effect: true,
             share_playtime: true,
+            connections: 8,
+            speed_limit_mb: 0,
         }
     }
 }

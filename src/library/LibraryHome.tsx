@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ChevronDown, Play } from 'lucide-react'
 import { Button, Label, MenuButton } from '@/ui'
 import { capsuleFor, type LibraryGame } from '@/lib/library'
@@ -167,8 +167,15 @@ export function Art({
   /** An adult game: blurred unless Settings says to show it. */
   adult?: boolean
 }) {
+  // A host that is slow or refuses once often answers the second time; try
+  // twice more (a second, then three) before drawing the title instead.
+  const [tries, setTries] = useState(0)
   const [failed, setFailed] = useState(false)
   const showAdult = useShowAdult()
+  useEffect(() => {
+    setTries(0)
+    setFailed(false)
+  }, [src])
   if (!src || failed) {
     return (
       <span className={`grid place-items-center bg-secondary p-3 text-center text-xs font-bold uppercase tracking-wider text-muted-foreground ${className ?? ''}`}>
@@ -176,5 +183,18 @@ export function Art({
       </span>
     )
   }
-  return <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} className={cn(className, adultBlur(adult, showAdult))} />
+  const retry = () => {
+    if (tries >= 2) return setFailed(true)
+    window.setTimeout(() => setTries((t) => t + 1), tries === 0 ? 1000 : 3000)
+  }
+  return (
+    <img
+      key={tries}
+      src={tries ? `${src}${src.includes('?') ? '&' : '?'}r=${tries}` : src}
+      alt=""
+      loading="lazy"
+      onError={retry}
+      className={cn(className, adultBlur(adult, showAdult))}
+    />
+  )
 }

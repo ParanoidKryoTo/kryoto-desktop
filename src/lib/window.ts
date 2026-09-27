@@ -15,14 +15,14 @@ export { isTauri }
 
 /**
  * `splash`: the small box the client starts in. `welcome`: the sign-in screen.
- * `main`: the client. The first two are fixed-size boxes on a transparent
- * window; the page paints the box.
+ * `main`: the client. The first two are fixed-size boxes; Windows rounds the
+ * corners and draws the shadow (see `round_corners` in system.rs).
  */
 export type WindowKind = 'splash' | 'welcome' | 'main'
 
 const SIZES: Record<WindowKind, { width: number; height: number }> = {
-  splash: { width: 364, height: 404 },
-  welcome: { width: 984, height: 664 },
+  splash: { width: 340, height: 380 },
+  welcome: { width: 960, height: 640 },
   main: { width: 1280, height: 800 },
 }
 
@@ -47,9 +47,6 @@ export async function applyWindow(kind: WindowKind) {
       /* first run, or storage unavailable */
     }
   }
-  // The boxes are rounded on a see-through window; the system's shadow would
-  // draw a square frame around them, so they draw their own instead.
-  await win.setShadow(kind === 'main').catch(() => {})
   await win.setResizable(kind === 'main')
   if (kind === 'main') {
     await win.setMaxSize(null)

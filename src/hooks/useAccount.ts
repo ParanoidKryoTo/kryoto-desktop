@@ -16,7 +16,7 @@ export type Account = {
  */
 export function useAccount(): Account | null | undefined {
   const [account, setAccount] = useState<Account | null | undefined>(
-    isTauri() ? undefined : { username: 'preview', displayName: 'Preview', avatarUrl: null, appearance: null },
+    isTauri() ? undefined : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null },
   )
   useEffect(() => {
     let stop: (() => void) | undefined

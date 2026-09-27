@@ -2,14 +2,7 @@ import { MessageSquare, Search, ShieldCheck, UserPlus, Users, Gamepad2 } from 'l
 import { Button, Caption, Label } from '@/ui'
 import type { Account } from '@/hooks/useAccount'
 import { AsciiArt } from '@/ui/ascii/AsciiArt'
-
-const BUBBLE = [
-  '╔══════════════════╗',
-  '║ ▪▪▪▪▪▪▪▪▪        ║',
-  '║ ▪▪▪▪▪▪▪▪▪▪▪▪▪▪   ║',
-  '╚═══╗ ╔════════════╝',
-  '    ╚═╝',
-]
+import { CHAT } from '@/ui/ascii/scenes'
 
 /**
  * Friends & chat - laid out the way it will work (your card, the friends
@@ -56,7 +49,7 @@ export function FriendsPage({ account, onProfile, onDiscord }: { account: Accoun
       </aside>
 
       <section className="grid min-h-0 place-content-center justify-items-center gap-6 overflow-auto p-10 text-center">
-        <AsciiArt lines={BUBBLE} mode="reveal" revealMs={700} className="h-24 text-muted-foreground" />
+        <AsciiArt lines={CHAT} mode="reveal" revealMs={800} className="h-24 text-muted-foreground" />
         <div className="grid gap-2">
           <Label>Friends &amp; chat</Label>
           <p className="text-2xl font-bold text-foreground">Coming soon</p>

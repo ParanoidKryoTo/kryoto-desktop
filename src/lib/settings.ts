@@ -27,6 +27,10 @@ export type Settings = {
   pressEffect: boolean
   /** Add play time to the kryo.to account. */
   sharePlaytime: boolean
+  /** Parallel connections per download. */
+  connections: number
+  /** MB/s cap; 0 is none. */
+  speedLimitMb: number
 }
 
 /** kryo.to's palettes, named as the site names them. */
@@ -48,7 +52,7 @@ export const RADII: { value: Radius; label: string }[] = [
   { value: 'pill', label: 'Pill' },
 ]
 
-export type Look = Pick<Settings, 'palette' | 'radius' | 'font' | 'showAdult'> & { pressEffect?: boolean }
+export type Look = Pick<Settings, 'palette' | 'radius' | 'font' | 'showAdult'> & { reducedMotion?: boolean }
 
 /** What a kryo.to account says about its look (`/api/auth/me`). */
 export type AccountAppearance = {
@@ -56,34 +60,35 @@ export type AccountAppearance = {
   radius: string | null
   typeface: string | null
   nsfwBlur: boolean
+  /** kryo.to's "reduce motion": no press, no animations. */
+  motion?: string | null
 }
 
 const PALETTE_IDS = new Set(PALETTES.map((p) => p.id as string))
 const RADIUS_IDS = new Set(RADII.map((r) => r.value as string))
 
 /**
- * The look to draw in: the account's, when Settings follows it and the site
- * has said, otherwise the client's own. The site's light theme is not carried
+ * The look to draw in: the account's, once kryo.to has said, else the defaults. The site's light theme is not carried
  * over - the client is dark by design - but its palette, corners, typeface
  * and adult blur are.
  */
 export function effectiveLook(s: Settings, account: { appearance?: AccountAppearance | null } | null | undefined): Look {
-  const a = s.followAccount ? account?.appearance : null
-  if (!a) return { palette: s.palette, radius: s.radius, font: s.font, showAdult: s.showAdult, pressEffect: s.pressEffect }
+  const a = account?.appearance
+  if (!a) return { palette: s.palette, radius: s.radius, font: s.font, showAdult: s.showAdult }
   return {
     palette: (a.palette && PALETTE_IDS.has(a.palette) ? a.palette : 'monochrome') as Palette,
     radius: (a.radius && RADIUS_IDS.has(a.radius) ? a.radius : 'pill') as Radius,
     font: a.typeface === 'mono' ? 'mono' : 'teletext',
     showAdult: !a.nsfwBlur,
-    pressEffect: s.pressEffect,
+    reducedMotion: a.motion === 'reduced',
   }
 }
 
 /** Stamp the look on <html>, the way kryo.to does before first paint. */
-export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { pressEffect?: boolean }) {
+export function applyLook(s: Pick<Settings, 'palette' | 'radius' | 'font'> & { reducedMotion?: boolean }) {
   const html = document.documentElement
-  if (s.pressEffect === false) html.dataset.press = 'off'
-  else delete html.dataset.press
+  if (s.reducedMotion) html.dataset.motion = 'reduced'
+  else delete html.dataset.motion
   html.dataset.palette = s.palette || 'monochrome'
   html.dataset.radius = s.radius || 'pill'
   if (s.font === 'mono') html.dataset.font = 'mono'

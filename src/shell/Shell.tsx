@@ -11,9 +11,10 @@ import {
   Trash2,
   User,
 } from 'lucide-react'
-import { Button, Check, ContextMenu, Label, Modal, type MenuEntry } from '@/ui'
-import { KryoMark } from '@/ui/ascii/KryoMark'
-import { AsciiArt } from '@/ui/ascii/AsciiArt'
+import { Button, Check, ContextMenu, Modal, type MenuEntry } from '@/ui'
+import { KryoMorph } from '@/ui/ascii/KryoMorph'
+import { EmptyState } from '@/ui/EmptyState'
+import { SHELF } from '@/ui/ascii/scenes'
 import { FriendsPage } from '@/friends/FriendsPage'
 import { CommunityPage } from '@/community/CommunityPage'
 import { TitleBar } from '@/shell/TitleBar'
@@ -141,11 +142,28 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     }
     window.addEventListener('mouseup', onMouse)
     window.addEventListener('keydown', onKey)
+    // The same buttons pressed over the Store, reported by its page.
+    let stopNav: (() => void) | undefined
+    let cancelled = false
+    void on<boolean>('nav-button', (fwd) => (fwd ? forward() : back())).then((fn) => (cancelled ? fn() : (stopNav = fn)))
     return () => {
+      cancelled = true
+      stopNav?.()
       window.removeEventListener('mouseup', onMouse)
       window.removeEventListener('keydown', onKey)
     }
   }, [back, forward])
+
+  // Ctrl+R and F5 reload the Store page (when it is showing), never the app.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.key === 'F5' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r'))) return
+      e.preventDefault()
+      if (view.kind === 'web') web.reload()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [view.kind, web])
 
   /* ── Overlays over the native web view ── */
   const [overlay, setOverlay] = useState<Overlay | null>(null)
@@ -153,7 +171,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   // Menus open in their own window over the Store; only dialogs hide it.
   const storeVisible =
     (view.kind === 'web' || (view.kind === 'settings' && isWebSection(view.section))) && !overlay && !page.error
-  const openSettings = useCallback((section: SettingsSection = 'interface') => go({ kind: 'settings', section }), [go])
+  const openSettings = useCallback((section: SettingsSection = 'general') => go({ kind: 'settings', section }), [go])
   // Leaving Settings: the account may have changed its look or name there.
   const wasSettings = useRef(false)
   useEffect(() => {
@@ -475,6 +493,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             gearItems={manageMenu(selected)}
             onStorePage={selected.slug ? () => openWeb(`/game/${selected.slug}`) : null}
             onGetUpdate={() => openWeb(`/game/${selected.slug}?download=1`)}
+            onGameChanged={lib.upsert}
             savedStatus={selected.slug ? (saved.find((e) => e.slug === selected.slug)?.status ?? null) : null}
             onSetStatus={(st) => selected.slug && void setSavedStatus(selected.slug, st).catch((e) => lib.setError(errorText(e)))}
           />
@@ -554,6 +573,10 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         <AddGameDialog
           initialSlug={overlay.slug}
           onClose={() => setOverlay(null)}
+          onDownload={(slug) => {
+            setOverlay(null)
+            openWeb(`/game/${slug}?download=1`)
+          }}
           onAdded={(game) => {
             lib.upsert(game)
             setOverlay(null)
@@ -607,12 +630,17 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       ) : null}
       {overlay?.kind === 'about' ? (
         <Modal title="About" onClose={() => setOverlay(null)}>
-          <div className="grid justify-items-center gap-4 py-2 text-center">
-            <KryoMark mode="reveal" className="h-16" />
-            <p className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">Kryoto Desktop {__APP_VERSION__}</p>
-            <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-              kryo.to as an app: the store, your games, and downloads that install themselves.
-            </p>
+          <div className="grid justify-items-center gap-5 py-4 text-center">
+            <KryoMorph className="h-20" />
+            <p className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground">Kryoto Desktop {__APP_VERSION__}</p>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => { setOverlay(null); openWeb('/changelog') }}>
+                Changelog
+              </Button>
+              <Button size="sm" onClick={() => { setOverlay(null); openWeb('/support') }}>
+                Support
+              </Button>
+            </div>
           </div>
         </Modal>
       ) : null}
@@ -622,26 +650,15 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
 
 function EmptyLibrary({ onStore, onAdd }: { onStore: () => void; onAdd: () => void }) {
   return (
-    <div className="grid grow place-content-center justify-items-center gap-4 text-center">
-      <AsciiArt
-        lines={['┌───────┐ ┌───────┐ ┌───────┐', '│ ░░░░░ │ │ ░░░░░ │ │ ░░░░░ │', '│ ░░░░░ │ │ ░░░░░ │ │ ░░░░░ │', '│       │ │       │ │       │', '└───────┘ └───────┘ └───────┘']}
-        mode="reveal"
-        className="h-16 text-muted-foreground"
-      />
-      <Label>Your library is empty</Label>
-      <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
-        Download a game from the store and it installs itself here, ready to play. Games already on this PC can be added too.
-      </p>
-      <div className="flex gap-2">
-        <Button variant="primary" onClick={onStore}>
-          Browse the store
-        </Button>
-        <Button onClick={onAdd}>
-          <Plus className="size-3.5" />
-          Add a game
-        </Button>
-      </div>
-    </div>
+    <EmptyState art={SHELF} title="No games yet" body="Games you download from the store appear here. You can also add games already on this PC.">
+      <Button variant="primary" onClick={onStore}>
+        Browse the store
+      </Button>
+      <Button onClick={onAdd}>
+        <Plus className="size-3.5" />
+        Add a game
+      </Button>
+    </EmptyState>
   )
 }
 

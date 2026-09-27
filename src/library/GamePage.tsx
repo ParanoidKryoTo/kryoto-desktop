@@ -6,6 +6,7 @@ import { formatLastPlayed, formatPlaytime } from '@/lib/format'
 import { errorText } from '@/lib/bridge'
 import { cn } from '@/lib/utils'
 import { adultBlur, useShowAdult } from '@/lib/adult'
+import { AddonsCard } from '@/library/AddonsCard'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 
 /**
@@ -29,6 +30,7 @@ export function GamePage({
   onGetUpdate,
   savedStatus,
   onSetStatus,
+  onGameChanged,
 }: {
   game: LibraryGame
   running: boolean
@@ -43,6 +45,7 @@ export function GamePage({
   /** Its status in the account's kryo.to library, when it is a kryo.to game. */
   savedStatus?: SavedStatus | null
   onSetStatus?: (status: SavedStatus | null) => void
+  onGameChanged?: (g: LibraryGame) => void
 }) {
   const [heroFailed, setHeroFailed] = useState(false)
   const showAdult = useShowAdult()
@@ -293,6 +296,7 @@ export function GamePage({
               </ul>
             </Card>
           ) : null}
+          <AddonsCard game={game} onGet={onGetUpdate} onChanged={(g) => onGameChanged?.(g)} />
           <Card>
             <Label className="mb-3">Play runs</Label>
             <CommandLine text={command || '...'} />

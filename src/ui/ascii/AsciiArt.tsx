@@ -35,8 +35,11 @@ export function AsciiArt({
   className,
   label,
   onRevealed,
+  from,
 }: {
   lines: readonly string[]
+  /** Art to scramble out of instead of nothing: a morph from `from` to `lines`. */
+  from?: readonly string[]
   mode?: AsciiMode
   revealMs?: number
   className?: string
@@ -67,13 +70,17 @@ export function AsciiArt({
     return () => window.clearInterval(id)
     // The art and mode define the animation; a new callback does not restart it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, mode, revealMs, still])
+  }, [lines, from, mode, revealMs, still])
 
-  const { cols, rows, width, height } = gridSize(lines)
+  const size = gridSize(from && gridSize(from).cols > gridSize(lines).cols ? from : lines)
+  const { cols, width } = size
+  const rows = Math.max(lines.length, from?.length ?? 0)
+  const height = rows * gridSize(['']).height
   const frame = Math.floor(t / FRAME_MS)
   const shown = useMemo(() => {
     if (still) return lines
-    const grid = lines.map((l) => Array.from(l.padEnd(cols)))
+    const grid = Array.from({ length: rows }, (_, r) => Array.from((lines[r] ?? '').padEnd(cols)))
+    const before = from ? Array.from({ length: rows }, (_, r) => Array.from((from[r] ?? '').padEnd(cols))) : null
     // Reveal: a front sweeps left to right; a few columns behind it are
     // still scrambling, everything past it is empty.
     if (reveals && t < revealMs) {
@@ -82,9 +89,10 @@ export function AsciiArt({
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           const target = grid[r]![c]!
+          const was = before?.[r]?.[c] ?? ' '
           const lag = front - c - (r % 2) * 0.5
-          if (lag <= 0) grid[r]![c] = ' '
-          else if (lag < band && target !== ' ') grid[r]![c] = pick(c, r, frame)
+          if (lag <= 0) grid[r]![c] = was
+          else if (lag < band && (target !== ' ' || was !== ' ')) grid[r]![c] = pick(c, r, frame)
         }
       }
       return grid.map((g) => g.join(''))
@@ -106,7 +114,7 @@ export function AsciiArt({
       return grid.map((g) => g.join(''))
     }
     return lines
-  }, [lines, still, reveals, shimmers, t, revealMs, cols, rows, frame])
+  }, [lines, from, still, reveals, shimmers, t, revealMs, cols, rows, frame])
 
   const paths = useMemo(() => asciiPaths(shown), [shown])
   return (

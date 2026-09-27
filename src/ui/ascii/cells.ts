@@ -73,22 +73,47 @@ export function drawable(ch: string) {
  * as shades. Rows may differ in length; anything not drawable is a space.
  */
 export function asciiPaths(lines: readonly string[]): { d: string; alpha: number }[] {
-  const byAlpha = new Map<number, string[]>()
+  const byAlpha = new Map<number, Rect[]>()
   lines.forEach((line, row) => {
     Array.from(line).forEach((ch, col) => {
       const shape = SHAPES[ch]
       if (!shape) return
       const alpha = shape.alpha ?? 1
-      const parts = byAlpha.get(alpha) ?? []
-      for (const [x, y, w, h] of shape.rects) {
-        const px = +(col * W + x).toFixed(2)
-        const py = +(row * H + y).toFixed(2)
-        parts.push(`M${px} ${py}h${+w.toFixed(2)}v${+h.toFixed(2)}h${-w.toFixed(2)}z`)
-      }
-      byAlpha.set(alpha, parts)
+      const rects = byAlpha.get(alpha) ?? []
+      for (const [x, y, w, h] of shape.rects) rects.push([+(col * W + x).toFixed(2), +(row * H + y).toFixed(2), +w.toFixed(2), +h.toFixed(2)])
+      byAlpha.set(alpha, rects)
     })
   })
-  return [...byAlpha.entries()].map(([alpha, parts]) => ({ alpha, d: parts.join('') }))
+  return [...byAlpha.entries()].map(([alpha, rects]) => ({
+    alpha,
+    d: merge(rects)
+      .map(([x, y, w, h]) => `M${x} ${y}h${w}v${h}h${-w}z`)
+      .join(''),
+  }))
+}
+
+/**
+ * Join rectangles that touch edge to edge into one - first along each row,
+ * then down the columns - so a run of blocks is one shape. Separate shapes
+ * that merely touch leave a hairline seam where anti-aliasing meets itself.
+ */
+function merge(rects: Rect[]): Rect[] {
+  const same = (a: number, b: number) => Math.abs(a - b) < 0.01
+  const rows = [...rects].sort((a, b) => a[1] - b[1] || a[3] - b[3] || a[0] - b[0])
+  const across: Rect[] = []
+  for (const r of rows) {
+    const last = across[across.length - 1]
+    if (last && same(last[1], r[1]) && same(last[3], r[3]) && same(last[0] + last[2], r[0])) last[2] = +(last[2] + r[2]).toFixed(2)
+    else across.push([...r] as Rect)
+  }
+  const cols = across.sort((a, b) => a[0] - b[0] || a[2] - b[2] || a[1] - b[1])
+  const down: Rect[] = []
+  for (const r of cols) {
+    const last = down[down.length - 1]
+    if (last && same(last[0], r[0]) && same(last[2], r[2]) && same(last[1] + last[3], r[1])) last[3] = +(last[3] + r[3]).toFixed(2)
+    else down.push([...r] as Rect)
+  }
+  return down
 }
 
 export function gridSize(lines: readonly string[]) {

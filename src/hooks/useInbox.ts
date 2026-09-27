@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { isTauri, on } from '@/lib/bridge'
+import { notify } from '@/lib/notify'
 
 export type KryoNotification = {
   id: string
@@ -48,7 +49,17 @@ export function useInbox() {
   useEffect(() => {
     const stops: Array<() => void> = []
     let cancelled = false
-    void on<Inbox>('inbox-state', (i) => setInbox({ unreadCount: i.unreadCount ?? 0, notifications: i.notifications ?? [] })).then(
+    // The first list is what was already there; after that, anything unread
+    // and new is also shown by the system, as the browser would.
+    let seen: Set<string> | null = null
+    void on<Inbox>('inbox-state', (i) => {
+      const list = i.notifications ?? []
+      if (seen) {
+        for (const n of list) if (!n.readAt && !seen.has(n.id)) void notify(n.title, n.body)
+      }
+      seen = new Set([...(seen ?? []), ...list.map((n) => n.id)])
+      setInbox({ unreadCount: i.unreadCount ?? 0, notifications: list })
+    }).then(
       (fn) => (cancelled ? fn() : stops.push(fn)),
     )
     void on<News>('news-state', setNews).then((fn) => (cancelled ? fn() : stops.push(fn)))

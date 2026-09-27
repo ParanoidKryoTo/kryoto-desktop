@@ -1,6 +1,6 @@
 import { Bell, Download, Play, Plus, Users } from 'lucide-react'
 import { asciiTrack } from '@/ui'
-import { formatBytes, progressOf, type Download as Dl } from '@/lib/downloads'
+import { formatBytes, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import type { Toast } from '@/shell/Toasts'
 
 const chip =
@@ -28,7 +28,7 @@ export function BottomBar({
   onFriends: () => void
   friendsActive?: boolean
 }) {
-  const active = downloads.find((d) => d.status === 'downloading' || d.status === 'extracting')
+  const active = downloads.find(isWorking)
   const waiting = downloads.filter((d) => d.status === 'queued' || d.status === 'paused').length
   return (
     <footer className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-t border-border bg-background px-2">
@@ -43,7 +43,7 @@ export function BottomBar({
         {active ? (
           <>
             <span className="max-w-40 truncate text-foreground">
-              {active.status === 'extracting' ? 'Installing' : active.meta.title}
+              {active.status === 'downloading' ? active.meta.title : phaseOf(active)}
             </span>
             <span className="kryo-ascii-art text-[11px] tracking-normal text-foreground">
               {asciiTrack(progressOf(active), 16)}

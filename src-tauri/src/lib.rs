@@ -1,8 +1,10 @@
+mod addons;
 mod compat;
 mod downloads;
 mod launch;
 mod library;
 mod logging;
+mod online;
 mod settings;
 mod storage;
 mod system;
@@ -186,7 +188,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
             palette: u.appearancePalette || null,
             radius: u.appearanceRadius || null,
             typeface: u.appearanceTypeface || null,
-            nsfwBlur: u.appearanceNsfwBlur !== false
+            nsfwBlur: u.appearanceNsfwBlur !== false,
+            motion: u.appearanceMotion || null
           }
         } : null });
         if (!u) return;
@@ -202,10 +205,16 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       .catch(() => {});
   };
   window.__kryoDesktopRefresh = who;
+  // The mouse's back and forward buttons: the app's history, not the page's,
+  // so they step through the Store and back into the Library like the arrows.
+  const side = (e) => { if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); return true } return false };
+  addEventListener('mousedown', side, true);
+  addEventListener('mouseup', (e) => { if (side(e)) invoke('store_nav_button', { forward: e.button === 4 }) }, true);
   addEventListener('offline', () => report({ error: 'offline' }));
   report();
   who();
   // Signing in or out happens on a page; look again when one settles.
+  setInterval(who, 60000);
   let last = location.pathname;
   setInterval(() => { if (location.pathname !== last) { last = location.pathname; who(); } }, 1500);
 })();
@@ -311,7 +320,39 @@ async fn store_mount(
     if visible == Some(false) {
         let _ = view.hide();
     }
+    #[cfg(windows)]
+    allow_repeat_downloads(&view);
     Ok(())
+}
+
+/// kryo.to starts a download once its check has passed, which is no longer the
+/// click itself. Chromium lets a page do that once; after that it asks before
+/// every further download, and WebView2 has nowhere to ask, so the second game
+/// of a session never arrived. kryo.to pages may; nothing else is let through.
+#[cfg(windows)]
+fn allow_repeat_downloads(view: &tauri::Webview) {
+    let _ = view.with_webview(|w| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::*;
+        use webview2_com::PermissionRequestedEventHandler;
+        let Ok(core) = w.controller().CoreWebView2() else { return };
+        let handler = PermissionRequestedEventHandler::create(Box::new(|_, args| {
+            let Some(args) = args else { return Ok(()) };
+            let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+            args.PermissionKind(&mut kind)?;
+            if kind != COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS {
+                return Ok(());
+            }
+            let mut uri = windows::core::PWSTR::null();
+            args.Uri(&mut uri)?;
+            let uri = webview2_com::take_pwstr(uri);
+            if uri.parse::<url::Url>().is_ok_and(|u| u.scheme() == "https" && is_kryoto(&u)) {
+                args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+            }
+            Ok(())
+        }));
+        let mut token = Default::default();
+        let _ = core.add_PermissionRequested(&handler, &mut token);
+    });
 }
 
 #[tauri::command]
@@ -322,6 +363,13 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
         let _ = view.set_focus();
     }
     Ok(())
+}
+
+/// A mouse back/forward button pressed in the Store: the shell steps its one
+/// history, as its arrows do.
+#[tauri::command]
+fn store_nav_button(app: tauri::AppHandle, forward: bool) {
+    let _ = app.emit_to("main", "nav-button", forward);
 }
 
 /// Kryoto path shortcut (menus, tabs). Path-only, same origin.
@@ -492,6 +540,7 @@ pub fn run() {
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(library::Running::default())
         .manage(downloads::Downloads::new())
         .manage(storage::Moving::default())
@@ -507,6 +556,7 @@ pub fn run() {
                 logging::error("tray", &e.to_string());
             }
             if let Some(main) = app.get_window("main") {
+                system::round_corners(&main, false);
                 if !to_tray {
                     let _ = main.show();
                 }
@@ -563,6 +613,7 @@ pub fn run() {
             navigate_catalog,
             browser_navigate,
             report_catalog_state,
+            store_nav_button,
             catalog_url,
             control_catalog,
             open_external,
@@ -584,6 +635,9 @@ pub fn run() {
             downloads::download_cancel,
             downloads::download_remove,
             compat::compat_tools,
+            addons::addon_undo,
+            online::online_apply,
+            online::online_undo,
             storage::storage_overview,
             storage::storage_add_folder,
             storage::storage_remove_folder,
@@ -619,11 +673,11 @@ mod tests {
         let src = include_str!("lib.rs");
         let start = src.find("generate_handler![").unwrap() + "generate_handler![".len();
         let end = start + src[start..].find(']').unwrap();
-        let allowed = include_str!("../permissions/shell.toml");
+        let allowed = format!("{}{}", include_str!("../permissions/shell.toml"), include_str!("../permissions/catalog.toml"));
         let missing: Vec<&str> = src[start..end]
             .split(',')
             .map(|c| c.trim().rsplit("::").next().unwrap_or("").trim())
-            .filter(|c| !c.is_empty() && *c != "report_catalog_state")
+            .filter(|c| !c.is_empty())
             .filter(|c| !allowed.contains(&format!("\"{c}\"")))
             .collect();
         assert!(missing.is_empty(), "add to permissions/shell.toml: {missing:?}");

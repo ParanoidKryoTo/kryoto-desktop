@@ -18,11 +18,11 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,6 +31,8 @@ pub enum Status {
     Queued,
     Downloading,
     Paused,
+    /// Checking the archive against the SHA-256 kryo.to lists for it.
+    Verifying,
     Extracting,
     Installed,
     Failed,
@@ -78,6 +80,70 @@ pub struct Download {
     pub added_at: u64,
     pub finished_at: Option<u64>,
     pub meta: CatalogMeta,
+    /// The byte ranges being fetched in parallel, and how far each has got.
+    pub segments: Vec<Segment>,
+    /// The archive's expected SHA-256, when kryo.to lists one.
+    pub sha256: Option<String>,
+    /// The archive matched it.
+    pub verified: bool,
+    /// Set when the file is one of the game's add-ons (a language pack, the
+    /// Online add-on): its name, e.g. "Japanese language pack".
+    pub addon: Option<String>,
+}
+
+/// One byte range of a download, on a connection of its own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Segment {
+    pub start: u64,
+    /// Inclusive.
+    pub end: u64,
+    pub done: u64,
+}
+
+impl Segment {
+    fn len(&self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+/// Split `total` bytes into up to `n` ranges of at least 16 MB each.
+pub fn split(total: u64, n: u32) -> Vec<Segment> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let min = 16 * 1024 * 1024;
+    let n = u64::from(n.max(1)).min((total / min).max(1));
+    let size = total.div_ceil(n);
+    (0..n)
+        .map(|i| Segment { start: i * size, end: ((i + 1) * size).min(total) - 1, done: 0 })
+        .filter(|s| s.start < total)
+        .collect()
+}
+
+/// A shared speed cap: every connection draws from the same budget.
+pub struct Limiter {
+    bytes_per_sec: u64,
+    start: Instant,
+    sent: AtomicU64,
+}
+
+impl Limiter {
+    pub fn new(mb_per_sec: u32) -> Self {
+        Self { bytes_per_sec: u64::from(mb_per_sec) * 1024 * 1024, start: Instant::now(), sent: AtomicU64::new(0) }
+    }
+
+    async fn take(&self, n: u64) {
+        if self.bytes_per_sec == 0 {
+            return;
+        }
+        let sent = self.sent.fetch_add(n, Ordering::SeqCst) + n;
+        let due = std::time::Duration::from_secs_f64(sent as f64 / self.bytes_per_sec as f64);
+        let elapsed = self.start.elapsed();
+        if due > elapsed {
+            tokio::time::sleep(due - elapsed).await;
+        }
+    }
 }
 
 const RUN: u8 = 0;
@@ -144,6 +210,32 @@ fn edit<R: Runtime>(app: &AppHandle<R>, id: &str, f: impl FnOnce(&mut Download))
     Some(item.clone())
 }
 
+/// The download as it stands (for the add-on installer).
+pub fn snapshot<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<Download> {
+    edit(app, id, |_| {})
+}
+
+pub fn set_status_pub<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status, error: Option<String>) {
+    set_status(app, id, status, error)
+}
+
+pub fn extract_progress<R: Runtime>(app: &AppHandle<R>, id: &str, done: u64, total: Option<u64>) {
+    edit(app, id, |d| {
+        d.extracted = done;
+        d.extract_total = total;
+    });
+    emit(app, false);
+}
+
+/// Mark a download installed, pointing at the game it went into.
+pub fn finish_as<R: Runtime>(app: &AppHandle<R>, id: &str, game: &LibraryGame) {
+    edit(app, id, |d| {
+        d.install_dir = Some(game.install_dir.clone());
+        d.game_id = Some(game.id.clone());
+    });
+    set_status(app, id, Status::Installed, None);
+}
+
 fn set_status<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status, error: Option<String>) {
     edit(app, id, |d| {
         d.status = status;
@@ -166,7 +258,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
     for d in &mut list {
-        if matches!(d.status, Status::Queued | Status::Downloading | Status::Extracting) {
+        if matches!(d.status, Status::Queued | Status::Downloading | Status::Verifying | Status::Extracting) {
             d.status = Status::Paused;
             d.speed = 0;
         }
@@ -202,7 +294,7 @@ pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>
         if list.iter().any(|d| {
             d.slug.is_some()
                 && d.slug == slug
-                && matches!(d.status, Status::Queued | Status::Downloading | Status::Extracting)
+                && matches!(d.status, Status::Queued | Status::Downloading | Status::Verifying | Status::Extracting)
         }) {
             let _ = app.emit("notify", Notice::new("Already downloading", "That game is already in Downloads.", None));
             return;
@@ -255,7 +347,7 @@ pub struct Notice {
 }
 
 impl Notice {
-    fn new(title: &str, body: &str, game_id: Option<String>) -> Self {
+    pub fn new(title: &str, body: &str, game_id: Option<String>) -> Self {
         Self { title: title.into(), body: body.into(), game_id }
     }
 }
@@ -271,7 +363,9 @@ async fn fetch_meta(client: &reqwest::Client, slug: &str) -> Option<CatalogMeta>
 
 pub fn meta_from_json(g: &serde_json::Value) -> CatalogMeta {
     let s = |k: &str| g[k].as_str().map(str::trim).filter(|v| !v.is_empty()).map(String::from);
-    let appid = s("steam_appid");
+    // A Steam branch listed as its own game carries a suffix ("2027330x");
+    // Steam's art is under the number alone.
+    let appid = s("steam_appid").map(|a| a.chars().take_while(char::is_ascii_digit).collect::<String>()).filter(|a| !a.is_empty());
     let entries: Vec<LaunchEntry> = serde_json::from_value(g["game_launch_options"]["available"].clone())
         .unwrap_or_default();
     CatalogMeta {
@@ -370,9 +464,15 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
     };
     if !already_complete {
         set_status(app, id, Status::Downloading, None);
+        let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
         let mut attempt = 0;
         loop {
-            match transfer(app, id, flag, &client, &settings.library_dir).await {
+            let step = if settings.connections > 1 {
+                transfer_parallel(app, id, flag, &client, &settings.library_dir, settings.connections, &limiter).await
+            } else {
+                transfer(app, id, flag, &client, &settings.library_dir).await
+            };
+            match step {
                 Ok(true) => break,
                 Ok(false) => return settle_stopped(app, id, flag),
                 Err(Transfer::Fatal(e)) => return Err(e),
@@ -389,7 +489,127 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
             }
         }
     }
+    identify(app, id, &client).await;
+    verify(app, id).await?;
+    if edit(app, id, |_| {}).and_then(|d| d.addon).is_some() {
+        return crate::addons::install(app, id, &settings).await;
+    }
     install(app, id, &settings).await
+}
+
+/// What kryo.to says about this exact file: its SHA-256, and whether it is
+/// one of the game's add-ons. Matched by the name it downloads as.
+async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Client) {
+    let Some(d) = edit(app, id, |_| {}) else { return };
+    let Some(slug) = d.slug.clone() else { return };
+    if d.file_name.is_empty() {
+        return;
+    }
+    #[allow(unused_mut)]
+    let mut base = "https://kryo.to".to_string();
+    // Debug builds only, beside KRYOTO_DEV_DOWNLOAD_HOST: the stand-in filehost
+    // also answers this, so a local archive can be checked against its own hash.
+    #[cfg(debug_assertions)]
+    if let Ok(dev) = std::env::var("KRYOTO_DEV_DOWNLOAD_HOST") {
+        if !dev.is_empty() {
+            base = format!("http://{dev}");
+        }
+    }
+    let Ok(res) = client.get(format!("{base}/api/games/{slug}/downloads")).send().await else { return };
+    let Ok(json) = res.json::<serde_json::Value>().await else { return };
+    let (sha, addon) = match_file(&json, &d.file_name);
+    edit(app, id, |d| {
+        if sha.is_some() {
+            d.sha256 = sha;
+        }
+        d.addon = addon;
+    });
+}
+
+/// The SHA-256 and (for an add-on) the name of `file` in a
+/// `/api/games/<slug>/downloads` answer.
+pub fn match_file(json: &serde_json::Value, file: &str) -> (Option<String>, Option<String>) {
+    let same = |name: &str| safe_name(name).eq_ignore_ascii_case(file);
+    let hash_in = |v: &serde_json::Value| {
+        v["hashes"].as_array().and_then(|hs| {
+            hs.iter()
+                .find(|h| h["name"].as_str().is_some_and(same))
+                .and_then(|h| h["sha256"].as_str())
+                .filter(|s| s.len() == 64)
+                .map(|s| s.to_ascii_lowercase())
+        })
+    };
+    if let Some(sha) = hash_in(json) {
+        return (Some(sha), None);
+    }
+    for addon in json["addons"].as_array().into_iter().flatten() {
+        let named = addon["links"].as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(same));
+        let hash = hash_in(addon);
+        if named || hash.is_some() {
+            let label = addon["label"].as_str().filter(|l| !l.trim().is_empty()).unwrap_or("Add-on").to_string();
+            return (hash, Some(label));
+        }
+    }
+    (None, None)
+}
+
+/// Check the archive against the SHA-256 kryo.to lists for it. A mismatch
+/// deletes the archive - it cannot be trusted, and resuming it would only
+/// keep the damage.
+async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let Some(expected) = d.sha256.clone() else { return Ok(()) };
+    if d.verified {
+        return Ok(());
+    }
+    set_status(app, id, Status::Verifying, None);
+    let path = PathBuf::from(&d.archive_path);
+    let total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let progress_app = app.clone();
+    let pid = id.to_string();
+    let actual = tauri::async_runtime::spawn_blocking(move || -> std::io::Result<String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let mut file = std::fs::File::open(&path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        let mut done = 0u64;
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            done += n as u64;
+            edit(&progress_app, &pid, |d| {
+                d.extracted = done;
+                d.extract_total = Some(total);
+            });
+            emit(&progress_app, false);
+        }
+        Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("Could not read the archive to check it: {e}"))?;
+    if actual != expected {
+        crate::logging::error("download", &format!("{id}: sha256 {actual} is not {expected}"));
+        let _ = std::fs::remove_file(&d.archive_path);
+        edit(app, id, |d| {
+            d.received = 0;
+            d.segments.clear();
+            d.archive_path.clear();
+            d.extracted = 0;
+            d.extract_total = None;
+        });
+        return Err("Archive doesn't match hash. Please try redownloading or contact support.".into());
+    }
+    edit(app, id, |d| {
+        d.verified = true;
+        d.extracted = 0;
+        d.extract_total = None;
+    });
+    Ok(())
 }
 
 fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
@@ -512,7 +732,15 @@ async fn transfer<R: Runtime>(
             edit(app, id, |d| d.received = received);
             return Ok(false);
         }
-        let chunk = chunk.map_err(|e| Transfer::Retry(e.to_string()))?;
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = file.flush().await;
+                let _ = file.sync_all().await;
+                edit(app, id, |d| d.received = received);
+                return Err(Transfer::Retry(e.to_string()));
+            }
+        };
         file.write_all(&chunk)
             .await
             .map_err(|e| Transfer::Fatal(format!("Writing the download failed: {e}")))?;
@@ -543,6 +771,236 @@ async fn transfer<R: Runtime>(
         return Err(Transfer::Retry("the connection closed early".into()));
     }
     Ok(true)
+}
+
+/// What a status code means for a download.
+fn check_status(code: u16) -> Result<(), Transfer> {
+    match code {
+        200 | 206 => Ok(()),
+        410 => Err(Transfer::Fatal("The download link expired. Open the game in the Store and press Download again.".into())),
+        403 => Err(Transfer::Fatal(
+            "kryo.to refused the link - it only works on the network it was made for. Press Download again in the Store.".into(),
+        )),
+        s if s >= 500 => Err(Transfer::Retry(format!("the server answered {s}"))),
+        s => Err(Transfer::Fatal(format!("The download failed: the server answered {s}."))),
+    }
+}
+
+/// Fetch in parallel: the file is split into ranges, each on its own
+/// connection, written straight to its place in a file made at full size. A
+/// server that does not do ranges falls back to one stream.
+async fn transfer_parallel<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    flag: &AtomicU8,
+    client: &reqwest::Client,
+    library_dir: &str,
+    connections: u32,
+    limiter: &Arc<Limiter>,
+) -> Result<bool, Transfer> {
+    let mut item = edit(app, id, |_| {}).ok_or(Transfer::Fatal("The download is gone.".into()))?;
+    let resumable = !item.segments.is_empty() && !item.archive_path.is_empty() && Path::new(&item.archive_path).is_file();
+    if !resumable {
+        let probe = client
+            .get(&item.url)
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .map_err(|e| Transfer::Retry(e.to_string()))?;
+        check_status(probe.status().as_u16())?;
+        let total = (probe.status().as_u16() == 206)
+            .then(|| {
+                probe
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.rsplit('/').next())
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+            .flatten();
+        let Some(total) = total.filter(|t| *t > 0) else {
+            drop(probe);
+            return transfer(app, id, flag, client, library_dir).await;
+        };
+        let name = probe
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(filename_from_disposition)
+            .or_else(|| probe.url().path_segments().and_then(|mut s| s.next_back()).map(String::from))
+            .map(|n| safe_name(&n))
+            .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
+        drop(probe);
+        crate::storage::check_room(Path::new(library_dir), total * 2, &item.meta.title).map_err(Transfer::Fatal)?;
+        let dir = Path::new(library_dir).join("_downloads");
+        std::fs::create_dir_all(&dir).map_err(|e| Transfer::Fatal(format!("Cannot write to {}: {e}", dir.display())))?;
+        let path = dir.join(&name);
+        let file = std::fs::File::create(&path).map_err(|e| Transfer::Fatal(format!("Cannot write {}: {e}", path.display())))?;
+        file.set_len(total).map_err(|e| Transfer::Fatal(format!("Cannot make room for {}: {e}", path.display())))?;
+        drop(file);
+        let segments = split(total, connections);
+        edit(app, id, |d| {
+            d.file_name = name.clone();
+            d.archive_path = path.to_string_lossy().into_owned();
+            d.total = Some(total);
+            d.received = 0;
+            d.segments = segments;
+            d.verified = false;
+        });
+        persist(app);
+        item = edit(app, id, |_| {}).ok_or(Transfer::Fatal("The download is gone.".into()))?;
+    }
+
+    let path = PathBuf::from(&item.archive_path);
+    let segments = item.segments.clone();
+    let progress: Arc<Vec<AtomicU64>> = Arc::new(segments.iter().map(|s| AtomicU64::new(s.done.min(s.len()))).collect());
+    let stop = Arc::new(AtomicU8::new(RUN));
+    let mut tasks = Vec::new();
+    for (i, seg) in segments.iter().cloned().enumerate() {
+        if seg.done >= seg.len() {
+            continue;
+        }
+        let (client, url, path, progress, limiter, stop) =
+            (client.clone(), item.url.clone(), path.clone(), progress.clone(), limiter.clone(), stop.clone());
+        tasks.push(tokio::spawn(async move { fetch_range(&client, &url, &path, i, seg, &progress, &stop, &limiter).await }));
+    }
+
+    let mut last_sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
+    let mut tick = Instant::now();
+    let mut last_persist = Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // Pause and cancel reach the connections through `stop`.
+        stop.store(flag.load(Ordering::SeqCst), Ordering::SeqCst);
+        let sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
+        let dt = tick.elapsed().as_secs_f64().max(0.001);
+        let speed = (sum.saturating_sub(last_sum) as f64 / dt) as u64;
+        last_sum = sum;
+        tick = Instant::now();
+        edit(app, id, |d| {
+            d.received = sum;
+            d.speed = if d.speed == 0 { speed } else { (d.speed * 2 + speed) / 3 };
+            for (i, s) in d.segments.iter_mut().enumerate() {
+                if let Some(p) = progress.get(i) {
+                    s.done = p.load(Ordering::SeqCst);
+                }
+            }
+        });
+        emit(app, false);
+        if last_persist.elapsed().as_secs() >= 5 {
+            persist(app);
+            last_persist = Instant::now();
+        }
+        if tasks.iter().all(|t| t.is_finished()) {
+            break;
+        }
+    }
+    let mut retry = None;
+    let mut fatal = None;
+    for t in tasks {
+        match t.await {
+            Ok(Ok(())) => {}
+            Ok(Err(Transfer::Retry(e))) => retry = Some(e),
+            Ok(Err(Transfer::Fatal(e))) => fatal = Some(e),
+            Err(e) => retry = Some(e.to_string()),
+        }
+    }
+    let sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
+    edit(app, id, |d| {
+        d.received = sum;
+        for (i, s) in d.segments.iter_mut().enumerate() {
+            if let Some(p) = progress.get(i) {
+                s.done = p.load(Ordering::SeqCst);
+            }
+        }
+    });
+    persist(app);
+    if let Some(e) = fatal {
+        return Err(Transfer::Fatal(e));
+    }
+    if flag.load(Ordering::SeqCst) != RUN {
+        return Ok(false);
+    }
+    if let Some(e) = retry {
+        return Err(Transfer::Retry(e));
+    }
+    Ok(true)
+}
+
+/// One range, on one connection, written at its own offset. Progress is only
+/// counted for bytes that have been written.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_range(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    index: usize,
+    seg: Segment,
+    progress: &[AtomicU64],
+    stop: &AtomicU8,
+    limiter: &Limiter,
+) -> Result<(), Transfer> {
+    let done = progress[index].load(Ordering::SeqCst);
+    if done >= seg.len() {
+        return Ok(());
+    }
+    let from = seg.start + done;
+    let res = client
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={from}-{}", seg.end))
+        .send()
+        .await
+        .map_err(|e| Transfer::Retry(e.to_string()))?;
+    check_status(res.status().as_u16())?;
+    if res.status().as_u16() != 206 {
+        return Err(Transfer::Fatal("The server stopped answering ranged requests. Set Downloads to one connection and try again.".into()));
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .await
+        .map_err(|e| Transfer::Fatal(format!("Cannot write {}: {e}", path.display())))?;
+    file.seek(std::io::SeekFrom::Start(from)).await.map_err(|e| Transfer::Fatal(e.to_string()))?;
+    let mut written = done;
+    let mut stream = res.bytes_stream();
+    let mut failure = None;
+    while let Some(chunk) = stream.next().await {
+        if stop.load(Ordering::SeqCst) != RUN {
+            break;
+        }
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                failure = Some(e.to_string());
+                break;
+            }
+        };
+        let take = (chunk.len() as u64).min(seg.len() - written) as usize;
+        if let Err(e) = file.write_all(&chunk[..take]).await {
+            return Err(Transfer::Fatal(format!("Writing the download failed: {e}")));
+        }
+        written += take as u64;
+        limiter.take(take as u64).await;
+        if written >= seg.len() {
+            break;
+        }
+        // Counted once the bytes are flushed often enough to matter: every
+        // 8 MB, and at the end.
+        if written - progress[index].load(Ordering::SeqCst) >= 8 * 1024 * 1024 {
+            file.flush().await.map_err(|e| Transfer::Fatal(e.to_string()))?;
+            progress[index].store(written, Ordering::SeqCst);
+        }
+    }
+    file.flush().await.map_err(|e| Transfer::Fatal(e.to_string()))?;
+    let _ = file.sync_data().await;
+    progress[index].store(written, Ordering::SeqCst);
+    if let Some(e) = failure {
+        return Err(Transfer::Retry(e));
+    }
+    if written < seg.len() && stop.load(Ordering::SeqCst) == RUN {
+        return Err(Transfer::Retry("the connection closed early".into()));
+    }
+    Ok(())
 }
 
 /// Unpack into the library folder, find the exe, and list the game.
@@ -643,7 +1101,7 @@ fn unpacked_size(archive: &Path) -> Option<u64> {
 }
 
 /// The one folder inside `dir`, when that is all there is.
-fn single_child_dir(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn single_child_dir(dir: &Path) -> Option<PathBuf> {
     let items: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
     match items.as_slice() {
         [only] if only.path().is_dir() => Some(only.path()),
@@ -921,6 +1379,37 @@ pub fn download_remove(app: AppHandle, state: State<'_, Downloads>, id: String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranges_cover_the_file_exactly() {
+        let total = 2_458_559_531u64;
+        let segs = split(total, 8);
+        assert_eq!(segs.len(), 8);
+        assert_eq!(segs[0].start, 0);
+        assert_eq!(segs.last().unwrap().end, total - 1);
+        for w in segs.windows(2) {
+            assert_eq!(w[0].end + 1, w[1].start);
+        }
+        assert_eq!(segs.iter().map(|s| s.len()).sum::<u64>(), total);
+        // Small files are not split into slivers.
+        assert_eq!(split(5 * 1024 * 1024, 8).len(), 1);
+        assert!(split(0, 8).is_empty());
+    }
+
+    #[test]
+    fn files_are_matched_to_their_hash_and_add_ons_are_recognised() {
+        let json = serde_json::json!({
+            "hashes": [{ "name": "Until Then - Kryoto.7z", "sha256": "8087783ba95268c527b59dba1a7a745bfbef5df90574aa05d5dd02742c6d3ec5" }],
+            "addons": [{ "label": "Online add-on", "links": [{ "name": "Until Then - Online - Kryoto.7z" }], "hashes": [] }]
+        });
+        let (sha, addon) = match_file(&json, "Until Then - Kryoto.7z");
+        assert_eq!(sha.as_deref(), Some("8087783ba95268c527b59dba1a7a745bfbef5df90574aa05d5dd02742c6d3ec5"));
+        assert!(addon.is_none());
+        let (sha, addon) = match_file(&json, "Until Then - Online - Kryoto.7z");
+        assert!(sha.is_none());
+        assert_eq!(addon.as_deref(), Some("Online add-on"));
+        assert_eq!(match_file(&json, "something else.7z"), (None, None));
+    }
 
     #[test]
     fn filenames_come_out_of_content_disposition() {

@@ -37,21 +37,16 @@ function BoxControls() {
   )
 }
 
-/** The box, inset from the window's edge so its own shadow has room. */
+/** The box is the whole window; Windows rounds it and draws its shadow. */
 function Box({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <div className={cn('h-full', isTauri() && 'p-3')}>
-      <main
-        data-tauri-drag-region
-        className={cn(
-          'drag kryo-radius relative h-full overflow-hidden border border-border bg-background text-foreground shadow-[0_6px_18px_rgba(0,0,0,0.55)]',
-          className,
-        )}
-      >
-        <BoxControls />
-        {children}
-      </main>
-    </div>
+    <main
+      data-tauri-drag-region
+      className={cn('drag kryo-square relative h-full overflow-hidden bg-background text-foreground', className)}
+    >
+      <BoxControls />
+      {children}
+    </main>
   )
 }
 

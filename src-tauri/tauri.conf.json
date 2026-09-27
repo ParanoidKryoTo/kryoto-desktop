@@ -14,17 +14,17 @@
       {
         "label": "main",
         "title": "Kryoto Desktop",
-        "width": 364,
-        "height": 404,
-        "minWidth": 364,
-        "minHeight": 404,
+        "width": 340,
+        "height": 380,
+        "minWidth": 340,
+        "minHeight": 380,
         "resizable": false,
         "center": true,
         "theme": "Dark",
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "backgroundColor": "#0a0a0a",
-        "shadow": false,
+        "shadow": true,
         "visible": false
       }
     ],

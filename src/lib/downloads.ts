@@ -7,6 +7,7 @@ export type DownloadStatus =
   | 'queued'
   | 'downloading'
   | 'paused'
+  | 'verifying'
   | 'extracting'
   | 'installed'
   | 'failed'
@@ -29,6 +30,11 @@ export type Download = {
   gameId: string | null
   addedAt: number
   finishedAt: number | null
+  /** kryo.to's SHA-256 for this file, when it lists one. */
+  sha256: string | null
+  verified: boolean
+  /** Set when the file is one of the game's add-ons: its name. */
+  addon: string | null
   meta: {
     title: string
     cover: string | null
@@ -53,15 +59,25 @@ export const downloads = {
 }
 
 export const isActive = (d: Download) =>
-  d.status === 'downloading' || d.status === 'extracting' || d.status === 'queued'
+  d.status === 'downloading' || d.status === 'verifying' || d.status === 'extracting' || d.status === 'queued'
 
-/** Download progress 0..1, counting unpacking as the last tenth. */
+/** The one moving now: fetching, checking or unpacking. */
+export const isWorking = (d: Download) => d.status === 'downloading' || d.status === 'verifying' || d.status === 'extracting'
+
+/** Overall progress 0..1: downloading to 85%, checking to 90%, unpacking the rest. */
 export function progressOf(d: Download): number {
   if (d.status === 'installed') return 1
-  if (d.status === 'extracting') {
-    return d.extractTotal ? 0.9 + 0.1 * Math.min(1, d.extracted / d.extractTotal) : 0.95
-  }
-  return d.total ? Math.min(1, d.received / d.total) * 0.9 : 0
+  const part = d.extractTotal ? Math.min(1, d.extracted / d.extractTotal) : 0
+  if (d.status === 'verifying') return 0.85 + 0.05 * part
+  if (d.status === 'extracting') return d.extractTotal ? 0.9 + 0.1 * part : 0.95
+  return d.total ? Math.min(1, d.received / d.total) * 0.85 : 0
+}
+
+/** What the download is doing, in one word, for labels. */
+export function phaseOf(d: Download): string {
+  if (d.status === 'verifying') return 'Checking'
+  if (d.status === 'extracting') return d.addon ? 'Applying' : 'Installing'
+  return 'Downloading'
 }
 
 /** The live list, kept current by the `downloads` event. */

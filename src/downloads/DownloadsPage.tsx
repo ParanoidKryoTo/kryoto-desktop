@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Download, Pause, Play, RotateCw, X } from 'lucide-react'
 import { AsciiBar, AsciiSpark, Button, Caption, IconButton, Label } from '@/ui'
-import { downloads as api, formatBytes, formatEta, isActive, progressOf, type Download as Dl } from '@/lib/downloads'
+import { downloads as api, formatBytes, formatEta, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { Art } from '@/library/LibraryHome'
-import { AsciiArt } from '@/ui/ascii/AsciiArt'
+import { EmptyState } from '@/ui/EmptyState'
+import { INBOX } from '@/ui/ascii/scenes'
 
 /**
  * Downloads: the game moving now across the top with its speed drawn in
@@ -19,22 +20,17 @@ export function DownloadsPage({
   onOpenGame: (id: string) => void
   onStore: () => void
 }) {
-  const current = list.find((d) => d.status === 'downloading' || d.status === 'extracting')
+  const current = list.find(isWorking)
   const waiting = list.filter((d) => d !== current && (isActive(d) || d.status === 'paused' || d.status === 'failed'))
   const done = list.filter((d) => d.status === 'installed' || d.status === 'canceled')
 
   if (list.length === 0) {
     return (
-      <div className="grid grow place-content-center justify-items-center gap-4 text-center">
-        <AsciiArt lines={['┌──────────┐', '│  ······  │', '│   ▼▼▼▼   │', '└──────────┘']} mode="reveal" className="h-14 text-muted-foreground" />
-        <Label>No downloads</Label>
-        <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-          Press Download on a game in the store. It lands here, installs itself and shows up in your library, ready to play.
-        </p>
+      <EmptyState art={INBOX} title="No downloads" body="Press Download on a game in the store. It installs itself and appears in your library.">
         <Button variant="primary" onClick={onStore}>
           Browse the store
         </Button>
-      </div>
+      </EmptyState>
     )
   }
 
@@ -68,7 +64,8 @@ function capsule(d: Dl): string | null {
 
 function Current({ d }: { d: Dl }) {
   const samples = useSpeedHistory(d)
-  const extracting = d.status === 'extracting'
+  // Past the download: checking the hash, then unpacking.
+  const extracting = d.status === 'extracting' || d.status === 'verifying'
   const fraction = extracting ? (d.extractTotal ? d.extracted / d.extractTotal : null) : d.total ? d.received / d.total : null
   return (
     <section className="kryo-radius kryo-in grid grid-cols-[260px_1fr] gap-6 border border-border bg-card p-5">
@@ -76,7 +73,10 @@ function Current({ d }: { d: Dl }) {
       <div className="grid content-start gap-4">
         <div className="flex items-start justify-between gap-4">
           <div className="grid gap-1">
-            <Caption>{extracting ? 'Installing' : 'Downloading'}</Caption>
+            <Caption>
+              {phaseOf(d)}
+              {d.addon ? ` · ${d.addon}` : ''}
+            </Caption>
             <h2 className="text-xl font-bold text-foreground">{d.meta.title}</h2>
           </div>
           {!extracting ? (
@@ -94,7 +94,10 @@ function Current({ d }: { d: Dl }) {
         <AsciiBar fraction={fraction} cells={44} className="text-sm" />
         <dl className="flex flex-wrap gap-8">
           {extracting ? (
-            <Stat k="Unpacked" v={`${formatBytes(d.extracted)}${d.extractTotal ? ` / ${formatBytes(d.extractTotal)}` : ''}`} />
+            <Stat
+              k={d.status === 'verifying' ? 'Checked' : 'Unpacked'}
+              v={`${formatBytes(d.extracted)}${d.extractTotal ? ` / ${formatBytes(d.extractTotal)}` : ''}`}
+            />
           ) : (
             <>
               <Stat k="Speed" v={`${formatBytes(d.speed)}/s`} />

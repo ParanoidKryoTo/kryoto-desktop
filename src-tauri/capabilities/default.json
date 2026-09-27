@@ -4,7 +4,7 @@
   "description": "Window and webview permissions for the launcher shell and its pop-up menus.",
   "windows": [
     "main",
-    "popup-host"
+    "popup"
   ],
   "webviews": [
     "main",
@@ -40,7 +40,7 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-unminimize",
-    "core:window:allow-set-shadow",
+    "notification:default",
     "allow-shell"
   ]
 }

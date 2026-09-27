@@ -30,9 +30,6 @@ export type NativeEntry =
   | { separator: true }
   | { heading: string }
 
-/** The pop-up's padding, which its shadow draws into. */
-export const POPUP_PAD = 12
-
 let handlers = new Map<string, () => void>()
 let current: string | null = null
 const listeners = new Set<(open: string | null) => void>()
@@ -70,6 +67,9 @@ function iconMarkup(icon: ReactNode): string | undefined {
     return undefined
   }
 }
+
+/** The pop-up page's padding, which the menu's shadow draws into. */
+export const POPUP_PAD = 12
 
 type Anchor = { left: number; right: number; bottom: number }
 

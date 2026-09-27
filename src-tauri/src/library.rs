@@ -52,6 +52,11 @@ pub struct LibraryGame {
     /// kryo.to marks it an adult game: its art is blurred unless Settings
     /// says to show adult art, as on the site.
     pub nsfw: bool,
+    /// Add-ons put into it (language packs, the Online add-on), with the files
+    /// each wrote, for Undo.
+    pub addons: Vec<crate::addons::InstalledAddon>,
+    /// Kryoto Online set up on this PC (not from a kryo.to add-on), for Undo.
+    pub online: Option<crate::online::LocalOnline>,
 }
 
 #[derive(Default)]
@@ -243,6 +248,9 @@ pub fn library_save(app: AppHandle, game: LibraryGame) -> Result<LibraryGame, St
         next.playtime_seconds = slot.playtime_seconds;
         next.last_played = slot.last_played;
         next.added_at = slot.added_at;
+        // Only applying and undoing change these, never the Properties window.
+        next.addons = slot.addons.clone();
+        next.online = slot.online.clone();
         if next.preferred_entry.is_some_and(|i| i >= next.entries.len()) {
             next.preferred_entry = None;
         }

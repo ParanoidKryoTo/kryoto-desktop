@@ -1,0 +1,169 @@
+import { useEffect, useState } from 'react'
+import { Download, Globe, Undo2 } from 'lucide-react'
+import { Button, Caption, Card, Label, Modal } from '@/ui'
+import { errorText } from '@/lib/bridge'
+import { fetchAddons, library, type KryoAddon, type LibraryGame } from '@/lib/library'
+
+const isOnline = (a: { label: string | null; source: string | null }) => /online/i.test(`${a.label ?? ''} ${a.source ?? ''}`)
+
+/**
+ * A game's add-ons: what kryo.to has for it (language packs, the Online
+ * add-on), what is applied, and Kryoto Online set up on this PC. Getting one
+ * opens the game's download window; it applies itself when it lands. Undo
+ * deletes what the add-on wrote.
+ */
+export function AddonsCard({
+  game,
+  onGet,
+  onChanged,
+}: {
+  game: LibraryGame
+  onGet: () => void
+  onChanged: (g: LibraryGame) => void
+}) {
+  const [available, setAvailable] = useState<KryoAddon[] | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<{ kind: 'addon'; file: string; label: string; count: number } | { kind: 'online' } | null>(null)
+
+  useEffect(() => {
+    setAvailable(null)
+    if (!game.slug) return setAvailable([])
+    let cancelled = false
+    void fetchAddons(game.slug)
+      .then((a) => !cancelled && setAvailable(a))
+      .catch(() => !cancelled && setAvailable([]))
+    return () => {
+      cancelled = true
+    }
+  }, [game.slug])
+
+  const applied = game.addons ?? []
+  const appliedFiles = new Set(applied.map((a) => a.file.toLowerCase()))
+  const isApplied = (a: KryoAddon) => a.links.some((l) => l.name && appliedFiles.has(l.name.toLowerCase()))
+  const kryoOnline = (available ?? []).find(isOnline)
+  const releaseIsOnline = /kryoto online/i.test(game.source ?? '')
+
+  const run = async (key: string, job: () => Promise<LibraryGame>) => {
+    setBusy(key)
+    setError(null)
+    try {
+      onChanged(await job())
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (available === null) return null
+  const nothing = available.length === 0 && applied.length === 0 && !game.online && (releaseIsOnline || !game.slug)
+  if (nothing) return null
+
+  return (
+    <Card className="grid gap-4">
+      <Label>Add-ons</Label>
+
+      {available
+        .filter((a) => !isApplied(a))
+        .map((a) => (
+          <Row
+            key={a.id}
+            title={a.label || 'Add-on'}
+            sub={[a.note, a.download_size].filter(Boolean).join(' · ')}
+            action={
+              <Button size="sm" onClick={onGet}>
+                <Download className="size-3" />
+                Get
+              </Button>
+            }
+          />
+        ))}
+
+      {applied.map((a) => (
+        <Row
+          key={a.file}
+          title={a.label}
+          sub={`Applied · ${a.files.length} file${a.files.length === 1 ? '' : 's'}`}
+          action={
+            <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => setConfirm({ kind: 'addon', file: a.file, label: a.label, count: a.files.length })}>
+              <Undo2 className="size-3" />
+              Undo
+            </Button>
+          }
+        />
+      ))}
+
+      {!releaseIsOnline && game.slug ? (
+        <Row
+          title="Kryoto Online on this PC"
+          sub={
+            game.online
+              ? `Set up · version ${game.online.version}`
+              : kryoOnline
+                ? 'Or use the Online add-on above - either works.'
+                : 'Plays online through Steam, set up here instead of downloaded.'
+          }
+          action={
+            game.online ? (
+              <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => setConfirm({ kind: 'online' })}>
+                <Undo2 className="size-3" />
+                Undo
+              </Button>
+            ) : (
+              <Button size="sm" disabled={!!busy} onClick={() => void run('online', () => library.onlineApply(game.id))}>
+                <Globe className="size-3" />
+                {busy === 'online' ? 'Setting up' : 'Set up'}
+              </Button>
+            )
+          }
+        />
+      ) : null}
+
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+
+      {confirm ? (
+        <Modal
+          title={confirm.kind === 'online' ? 'Remove Kryoto Online' : `Undo ${confirm.label}`}
+          onClose={() => setConfirm(null)}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  const c = confirm
+                  setConfirm(null)
+                  if (c.kind === 'online') void run('online', () => library.onlineUndo(game.id))
+                  else void run(c.file, () => library.addonUndo(game.id, c.file))
+                }}
+              >
+                {confirm.kind === 'online' ? 'Remove' : 'Delete its files'}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {confirm.kind === 'online'
+              ? "Deletes Kryoto Online's files and puts back the game's own."
+              : `Deletes the ${confirm.count} file${confirm.count === 1 ? '' : 's'} it added. Files it replaced are not brought back; download the game again if it needs them.`}
+          </p>
+        </Modal>
+      ) : null}
+    </Card>
+  )
+}
+
+function Row({ title, sub, action }: { title: string; sub?: string; action: React.ReactNode }) {
+  return (
+    <div className="kryo-radius flex items-center gap-3 border border-border p-3">
+      <span className="grid min-w-0 grow gap-0.5">
+        <span className="truncate text-xs font-bold text-foreground">{title}</span>
+        {sub ? <Caption className="normal-case tracking-normal">{sub}</Caption> : null}
+      </span>
+      {action}
+    </div>
+  )
+}

@@ -2,7 +2,7 @@
 
 # Kryoto Desktop
 
-kryo.to as an app: the store, your games, and downloads that install themselves.
+Kryoto Desktop is an app where you manage everything on Kryoto in one place: find a game, download it and play it. Runs on Windows and Linux.
 
 ![Library](docs/screenshots/library.png)
 
@@ -11,6 +11,7 @@ kryo.to as an app: the store, your games, and downloads that install themselves.
 | ![Start](docs/screenshots/splash.png) | ![Sign in](docs/screenshots/welcome.png) |
 | ![Game](docs/screenshots/game.png) | ![Downloads](docs/screenshots/downloads.png) |
 | ![Storage](docs/screenshots/storage.png) | ![Community](docs/screenshots/community.png) |
+| ![Download settings](docs/screenshots/settings.png) | |
 
 ## Run it
 

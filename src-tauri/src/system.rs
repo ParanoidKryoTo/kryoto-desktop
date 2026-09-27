@@ -11,7 +11,7 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl, WindowEvent,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl, WindowEvent,
 };
 
 /* ── One copy at a time ───────────────────────────────────── */
@@ -156,6 +156,34 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
     }
 }
 
+/* ── Window corners ───────────────────────────────────────── */
+
+/// Windows 11 rounds a frameless window's corners and draws its shadow
+/// itself when asked - the same corners as every other window, with no
+/// see-through edge to paint. `small` is the tighter radius Windows uses for
+/// menus. Older Windows and Linux keep square corners.
+pub fn round_corners<R: Runtime>(window: &tauri::Window<R>, small: bool) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+        if let Ok(hwnd) = window.hwnd() {
+            // DWMWCP_ROUND = 2, DWMWCP_ROUNDSMALL = 3.
+            let pref: i32 = if small { 3 } else { 2 };
+            // SAFETY: a live window handle and a pointer to a 4-byte value.
+            unsafe {
+                DwmSetWindowAttribute(
+                    hwnd.0 as _,
+                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                    (&pref as *const i32).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, small);
+}
+
 /* ── Starting with the computer ───────────────────────────── */
 
 #[cfg(windows)]
@@ -226,10 +254,11 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
 // sends what to draw; the pop-up draws it, says how big it came out, and
 // reports what was picked. The Store keeps working the whole time.
 
-/// The pop-up's window, and the web view inside it that draws the menu. The
-/// main window holds more than one web view, so windows are looked up with
-/// `get_window` - `get_webview_window` only finds single-view windows.
-const POPUP_WINDOW: &str = "popup-host";
+/// The pop-up is a single-view window (so it can be see-through, and the menu
+/// can have the reader's own corners and a soft shadow). Windows are looked up
+/// with `get_window`: the main window holds more than one web view, and
+/// `get_webview_window` only finds single-view ones.
+const POPUP_WINDOW: &str = "popup";
 const POPUP: &str = "popup";
 
 #[derive(Default)]
@@ -280,7 +309,7 @@ pub async fn popup_open(app: AppHandle, x: f64, y: f64, right: bool, payload: se
     // First menu of the session: make the window. It asks for its payload
     // when its page has loaded (`popup_payload`), so nothing is lost to an
     // event sent before anything was listening.
-    let w = tauri::window::WindowBuilder::new(&app, POPUP_WINDOW)
+    let builder = tauri::WebviewWindowBuilder::new(&app, POPUP, WebviewUrl::default())
         .title("Kryoto menu")
         .decorations(false)
         .transparent(true)
@@ -290,17 +319,13 @@ pub async fn popup_open(app: AppHandle, x: f64, y: f64, right: bool, payload: se
         .visible(false)
         .focused(true)
         .inner_size(220.0, 120.0)
-        .position(sx, sy)
-        .parent(&main)
-        .map_err(|e| e.to_string())?
-        .build()
-        .map_err(|e| e.to_string())?;
-    w.add_child(
-        WebviewBuilder::new(POPUP, WebviewUrl::default()).transparent(true).auto_resize(),
-        LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(220.0, 120.0),
-    )
-    .map_err(|e| e.to_string())?;
+        .position(sx, sy);
+    // Owned by the main window, so it stays above it and goes with it.
+    #[cfg(windows)]
+    let builder = builder.owner_raw(main.hwnd().map_err(|e| e.to_string())?);
+    #[cfg(not(windows))]
+    let builder = builder.always_on_top(true);
+    let w = builder.build().map_err(|e| e.to_string())?;
     let app2 = app.clone();
     w.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {

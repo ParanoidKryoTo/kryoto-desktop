@@ -40,6 +40,30 @@ export type LibraryGame = {
   developer: string | null
   /** kryo.to marks it an adult game; its art is blurred unless Settings says otherwise. */
   nsfw: boolean
+  /** Add-ons put into it, with the files each wrote (for Undo). */
+  addons?: InstalledAddon[]
+  /** Kryoto Online set up on this PC. */
+  online?: { version: string; added: string[]; saved: [string, string][]; appliedAt: number } | null
+}
+
+export type InstalledAddon = { label: string; file: string; files: string[]; installedAt: number }
+
+/** One of a game's add-ons on kryo.to (`/api/games/<slug>/downloads`). */
+export type KryoAddon = {
+  id: number | string
+  label: string | null
+  note: string | null
+  source: string | null
+  version: string | null
+  download_size: string | null
+  links: { name: string | null }[]
+}
+
+export async function fetchAddons(slug: string): Promise<KryoAddon[]> {
+  const res = await fetch(`https://kryo.to/api/games/${encodeURIComponent(slug)}/downloads`)
+  if (!res.ok) return []
+  const json = (await res.json()) as { addons?: KryoAddon[] }
+  return json.addons ?? []
 }
 
 export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null }
@@ -82,6 +106,9 @@ export const library = {
   openFolder: (path: string) => call<void>('open_folder', { path }),
   onState: (fn: (e: GameStateEvent) => void) => on<GameStateEvent>('game-state', fn),
   onChanged: (fn: () => void) => on<unknown>('library-changed', fn),
+  addonUndo: (gameId: string, file: string) => call<LibraryGame>('addon_undo', { gameId, file }),
+  onlineApply: (gameId: string) => call<LibraryGame>('online_apply', { gameId }),
+  onlineUndo: (gameId: string) => call<LibraryGame>('online_undo', { gameId }),
 }
 
 /* ── kryo.to ─────────────────────────────────────────────── */
@@ -122,7 +149,9 @@ export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
   const { game } = (await res.json()) as { game: Record<string, unknown> }
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null)
   const available = (game.game_launch_options as { available?: LaunchEntry[] } | null)?.available
-  const appid = str(game.steam_appid)
+  // A Steam branch listed as its own game carries a suffix (GoreBox's
+  // "2027330x"); Steam's art is under the number alone.
+  const appid = str(game.steam_appid)?.match(/^\d+/)?.[0] ?? null
   return {
     slug,
     title: str(game.title) ?? slug,

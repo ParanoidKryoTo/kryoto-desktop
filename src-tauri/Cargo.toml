@@ -22,9 +22,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 tokio = { version = "1", features = ["sync", "fs", "io-util", "time"] }
 futures-util = "0.3"
 sevenz-rust = "0.6"
+sha2 = "0.10"
+tauri-plugin-notification = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
+webview2-com = "0.38"
+windows = { version = "0.61", default-features = false }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
