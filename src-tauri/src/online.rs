@@ -86,7 +86,34 @@ fn config_dirs(root: &Path, dlls: &[PathBuf]) -> Vec<PathBuf> {
     dirs
 }
 
-pub fn ini(appid: &str) -> String {
+/// The DLC the release already unlocks: Forge writes them into gbe_fork's
+/// `steam_settings/configs.app.ini` beside each dll (`[app::dlcs]`,
+/// `<appid>=<name>`). kryo.to only keeps DLC names, so this is the one place
+/// the ids Forge used are on the player's machine.
+fn release_dlc(dlls: &[PathBuf]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for dll in dlls {
+        let Some(dir) = dll.parent() else { continue };
+        let Ok(text) = std::fs::read_to_string(dir.join("steam_settings").join("configs.app.ini")) else { continue };
+        let mut in_dlcs = false;
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_dlcs = line.eq_ignore_ascii_case("[app::dlcs]");
+            } else if in_dlcs {
+                if let Some((key, _)) = line.split_once('=') {
+                    let key = key.trim();
+                    if !key.is_empty() && key.chars().all(|c| c.is_ascii_digit()) && !ids.iter().any(|i| i == key) {
+                        ids.push(key.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
+pub fn ini(appid: &str, dlc: &[String]) -> String {
+    let unlock = dlc.join(",");
     format!(
         "; Written by Kryoto Desktop. Delete to fall back to defaults.\n\
          [Settings]\n\
@@ -94,7 +121,7 @@ pub fn ini(appid: &str) -> String {
          ogAppId={appid}\n\
          PluginsFolder=plugins\n\
          GetStubbedLol=true\n\
-         UnlockDLC=\n\
+         UnlockDLC={unlock}\n\
          EmulateTicket=true\n"
     )
 }
@@ -216,7 +243,7 @@ pub async fn online_apply(app: AppHandle, game_id: String) -> Result<LibraryGame
                     rec.saved.push((rel(&root, &appid_txt), rel(&root, &backup)));
                 }
             }
-            let text = ini(&appid);
+            let text = ini(&appid, &release_dlc(&dlls));
             for dir in config_dirs(&root, &dlls) {
                 let path = dir.join("kryoto-online.ini");
                 if path.exists() {
@@ -229,6 +256,14 @@ pub async fn online_apply(app: AppHandle, game_id: String) -> Result<LibraryGame
                     rec.added.push(rel(&root, &path));
                 }
                 std::fs::write(&path, &text).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+                // As Forge does: without the folder Kryoto Online reports
+                // missing plugins on every launch. Recorded only when made
+                // here, so a game's own plugins folder is never taken away.
+                let plugins = dir.join("plugins");
+                if !plugins.exists() {
+                    std::fs::create_dir_all(&plugins).map_err(|e| e.to_string())?;
+                    rec.added.push(rel(&root, &plugins));
+                }
             }
             Ok(())
         })();
@@ -256,7 +291,12 @@ pub async fn online_apply(app: AppHandle, game_id: String) -> Result<LibraryGame
 fn undo_files(root: &Path, rec: &LocalOnline) {
     for f in &rec.added {
         if let Ok(p) = crate::launch::inside(root, f) {
-            let _ = std::fs::remove_file(p);
+            if p.is_dir() {
+                // Only if still empty: plugins a player put in stay.
+                let _ = std::fs::remove_dir(p);
+            } else {
+                let _ = std::fs::remove_file(p);
+            }
         }
     }
     for (file, backup) in &rec.saved {
@@ -322,7 +362,23 @@ mod tests {
 
     #[test]
     fn the_ini_spoofs_spacewar_and_names_the_real_game() {
-        let t = ini("1190600");
+        let t = ini("1190600", &["1190610".into(), "1190611".into()]);
         assert!(t.contains("AppId=480\n") && t.contains("ogAppId=1190600\n") && t.contains("EmulateTicket=true"));
+        assert!(t.contains("UnlockDLC=1190610,1190611\n"));
+    }
+
+    #[test]
+    fn dlc_comes_from_the_release_forge_built() {
+        let base = std::env::temp_dir().join(format!("kryoto-dlc-{}", std::process::id()));
+        let settings = base.join("bin/steam_settings");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(
+            settings.join("configs.app.ini"),
+            "[app::general]\nbuild_id=1\n[app::dlcs]\nunlock_all=1\n2001=Soundtrack\n2002 = Artbook\n\n[app::other]\n9=x\n",
+        )
+        .unwrap();
+        assert_eq!(release_dlc(&[base.join("bin/steam_api64.dll")]), vec!["2001".to_string(), "2002".to_string()]);
+        assert!(release_dlc(&[base.join("nowhere/steam_api64.dll")]).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

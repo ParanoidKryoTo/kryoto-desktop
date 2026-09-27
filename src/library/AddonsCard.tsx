@@ -8,7 +8,7 @@ const isOnline = (a: { label: string | null; source: string | null }) => /online
 
 /**
  * A game's add-ons: what kryo.to has for it (language packs, the Online
- * add-on), what is applied, and Kryoto Online set up on this PC. Getting one
+ * add-on), what is applied, and Kryoto Online set up on this PC. Applying one
  * opens the game's download window; it applies itself when it lands. Undo
  * deletes what the add-on wrote.
  */
@@ -72,9 +72,12 @@ export function AddonsCard({
             title={a.label || 'Add-on'}
             sub={[a.note, a.download_size].filter(Boolean).join(' · ')}
             action={
+              // kryo.to's download window, where it is under Optional extras:
+              // the download has to pass the site's check there. Once it
+              // lands it goes into this game by itself.
               <Button size="sm" onClick={onGet}>
                 <Download className="size-3" />
-                Get
+                Apply add-on
               </Button>
             }
           />
