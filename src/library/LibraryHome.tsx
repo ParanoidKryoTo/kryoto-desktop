@@ -5,6 +5,7 @@ import { capsuleFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
 import { adultBlur, useShowAdult } from '@/lib/adult'
 import { cn } from '@/lib/utils'
+import { usePersisted } from '@/hooks/usePersisted'
 
 type Sort = 'alpha' | 'recent' | 'playtime' | 'added'
 
@@ -14,6 +15,7 @@ const SORTS: Record<Sort, string> = {
   playtime: 'Hours played',
   added: 'Recently added',
 }
+const isSort = (v: string): v is Sort => v in SORTS
 
 /**
  * Library home. The game you played last, big, one press from Play - then
@@ -32,7 +34,7 @@ export function LibraryHome({
   onPlay: (game: LibraryGame) => void
   onContext: (game: LibraryGame, x: number, y: number) => void
 }) {
-  const [sort, setSort] = useState<Sort>('alpha')
+  const [sort, setSort] = usePersisted<Sort>('kryoto.library.sort', 'alpha', isSort)
   const recent = useMemo(
     () => games.filter((g) => g.lastPlayed).sort((a, b) => (b.lastPlayed ?? 0) - (a.lastPlayed ?? 0)),
     [games],

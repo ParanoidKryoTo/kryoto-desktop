@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { usePersisted } from '@/hooks/usePersisted'
 import { Download as DownloadIcon, Home, Search } from 'lucide-react'
 import { asciiTrack, Dropdown } from '@/ui'
 import { isActive, progressOf, type Download } from '@/lib/downloads'
@@ -9,6 +10,11 @@ import { STATUSES, STATUS_LABEL, useAdultFlags, type SavedEntry, type SavedStatu
 
 type Shelf = 'installed' | 'saved' | SavedStatus
 
+const isShelf = (v: string): v is Shelf => v === 'installed' || v === 'saved' || (STATUSES as string[]).includes(v)
+
+/** The search, kept while the client is open (the Library remounts on every visit). */
+let lastQuery = ''
+
 /**
  * The Library's left rail: Home, search, every game - and under them the ones
  * still downloading, with their ASCII progress, the way Steam lists a game
@@ -16,7 +22,8 @@ type Shelf = 'installed' | 'saved' | SavedStatus
  *
  * "Show" switches the list to one of the account's kryo.to shelves (Playing,
  * Plan to Play, Favorite...), Steam's collections: games on this PC open as
- * usual, the rest are dimmed and open their store page.
+ * usual, the rest are dimmed and open a page of their own in the Library.
+ * The shelf picked is remembered, and the search while the client is open.
  */
 export function Sidebar({
   games,
@@ -30,7 +37,8 @@ export function Sidebar({
   onContext,
   onDownloads,
   saved,
-  onStorePage,
+  selectedSlug,
+  onCatalogGame,
 }: {
   games: LibraryGame[]
   downloads: Download[]
@@ -43,10 +51,16 @@ export function Sidebar({
   onContext: (game: LibraryGame, x: number, y: number) => void
   onDownloads: () => void
   saved: SavedEntry[]
-  onStorePage: (slug: string) => void
+  /** The kryo.to game (not on this PC) whose page is open. */
+  selectedSlug: string | null
+  onCatalogGame: (slug: string) => void
 }) {
-  const [query, setQuery] = useState('')
-  const [shelf, setShelf] = useState<Shelf>('installed')
+  const [query, setQueryState] = useState(lastQuery)
+  const setQuery = (q: string) => {
+    lastQuery = q
+    setQueryState(q)
+  }
+  const [picked, setShelf] = usePersisted<Shelf>('kryoto.library.shelf', 'installed', isShelf)
   const showAdult = useShowAdult()
   const q = query.trim().toLowerCase()
   const list = useMemo(
@@ -57,6 +71,9 @@ export function Sidebar({
     [games, q],
   )
   const bySlug = useMemo(() => new Map(games.filter((g) => g.slug).map((g) => [g.slug!, g])), [games])
+  // A remembered shelf that is empty now (or not reported yet) shows this PC's games.
+  const shelf: Shelf =
+    picked === 'installed' || (picked === 'saved' ? saved.length > 0 : saved.some((e) => e.status === picked)) ? picked : 'installed'
   const shelfEntries = useMemo(
     () =>
       shelf === 'installed'
@@ -121,14 +138,16 @@ export function Sidebar({
                 <button
                   key={e.slug}
                   type="button"
-                  aria-current={game && game.id === selectedId ? 'page' : undefined}
-                  title={game ? undefined : 'Not on this PC - open its store page'}
-                  onClick={() => (game ? onSelect(game.id) : onStorePage(e.slug))}
+                  aria-current={(game ? game.id === selectedId : e.slug === selectedSlug) ? 'page' : undefined}
+                  title={game ? undefined : 'Not on this PC'}
+                  onClick={() => (game ? onSelect(game.id) : onCatalogGame(e.slug))}
                   onDoubleClick={() => game && onPlay(game)}
                   className={cn(
                     'kryo-pill flex h-9 w-full items-center gap-2.5 px-2 text-left text-xs transition-colors',
-                    game && game.id === selectedId ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
-                    !game && 'opacity-55 hover:opacity-100',
+                    (game ? game.id === selectedId : e.slug === selectedSlug)
+                      ? 'bg-secondary text-foreground'
+                      : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
+                    !game && e.slug !== selectedSlug && 'opacity-55 hover:opacity-100',
                   )}
                 >
                   {cover ? (

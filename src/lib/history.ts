@@ -3,7 +3,8 @@ import type { SettingsSection } from '@/settings/SettingsPage'
 /**
  * The client's one history, behind its Back and Forward.
  *
- * Every place in the client is an entry: the Library, a game, Downloads, the
+ * Every place in the client is an entry: the Library, a game (installed or
+ * only on one of your kryo.to lists), Downloads, the
  * Community page, Settings, and each Store page, which carries its own
  * address. Back always goes to the entry before, wherever that was, so a
  * profile opened from the Community page goes back to the Community page and
@@ -20,6 +21,8 @@ export type View =
   | { kind: 'web'; url: string }
   | { kind: 'home' }
   | { kind: 'game'; id: string }
+  /** A kryo.to game on one of your lists that is not on this PC. */
+  | { kind: 'catalog'; slug: string }
   | { kind: 'downloads' }
   | { kind: 'friends' }
   | { kind: 'community' }
@@ -45,6 +48,8 @@ export function sameView(a: View, b: View) {
       return sameUrl(a.url, (b as typeof a).url)
     case 'game':
       return a.id === (b as typeof a).id
+    case 'catalog':
+      return a.slug === (b as typeof a).slug
     case 'settings':
       return a.section === (b as typeof a).section
     default:

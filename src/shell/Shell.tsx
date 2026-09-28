@@ -26,6 +26,7 @@ import { Toasts, useToasts, type Toast } from '@/shell/Toasts'
 import { Sidebar } from '@/library/Sidebar'
 import { LibraryHome } from '@/library/LibraryHome'
 import { GamePage } from '@/library/GamePage'
+import { CatalogGamePage } from '@/library/CatalogGamePage'
 import { LaunchChooser } from '@/library/LaunchChooser'
 import { GameProperties } from '@/library/GameProperties'
 import { AddGameDialog } from '@/library/AddGameDialog'
@@ -538,8 +539,11 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   }
 
   /* ── Library area ── */
-  const selectedId = view.kind === 'game' ? view.id : null
+  // A listed game that has since been installed opens as the game it now is.
+  const catalogInstalled = view.kind === 'catalog' ? (lib.games.find((g) => g.slug === view.slug) ?? null) : null
+  const selectedId = view.kind === 'game' ? view.id : catalogInstalled?.id ?? null
   const selected = selectedId ? gameById(selectedId) : null
+  const catalogSlug = view.kind === 'catalog' && !catalogInstalled ? view.slug : null
 
   let content: React.ReactNode = null
   if (view.kind === 'community') {
@@ -578,7 +582,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         />
       </div>
     )
-  } else if (view.kind === 'home' || view.kind === 'game') {
+  } else if (view.kind === 'home' || view.kind === 'game' || view.kind === 'catalog') {
     content = (
       <div className="absolute inset-0 flex bg-background">
         <Sidebar
@@ -593,9 +597,25 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           onContext={(game, x, y) => setCtx({ game, x, y })}
           onDownloads={() => go({ kind: 'downloads' })}
           saved={saved}
-          onStorePage={(slug) => openWeb(`/game/${slug}`)}
+          selectedSlug={catalogSlug}
+          onCatalogGame={(slug) => go({ kind: 'catalog', slug })}
         />
-        {view.kind === 'game' && selected ? (
+        {catalogSlug ? (
+          <CatalogGamePage
+            key={catalogSlug}
+            slug={catalogSlug}
+            fallback={(() => {
+              const entry = saved.find((e) => e.slug === catalogSlug)
+              return { title: entry?.title ?? catalogSlug, cover: entry?.cover || null }
+            })()}
+            download={dl.find((d) => d.slug === catalogSlug) ?? null}
+            savedStatus={saved.find((e) => e.slug === catalogSlug)?.status ?? null}
+            onSetStatus={(st) => void setSavedStatus(catalogSlug, st).catch((e) => lib.setError(errorText(e)))}
+            onInstall={() => openWeb(`/game/${catalogSlug}?download=1`)}
+            onStorePage={() => openWeb(`/game/${catalogSlug}`)}
+            onDownloads={() => go({ kind: 'downloads' })}
+          />
+        ) : (view.kind === 'game' || catalogInstalled) && selected ? (
           <GamePage
             key={selected.id}
             game={selected}
