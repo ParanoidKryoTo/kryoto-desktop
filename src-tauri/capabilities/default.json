@@ -1,10 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Window and webview permissions for the launcher shell and its pop-up menus.",
+  "description": "Window and webview permissions for the launcher shell and its menu view.",
   "windows": [
-    "main",
-    "popup"
+    "main"
   ],
   "webviews": [
     "main",

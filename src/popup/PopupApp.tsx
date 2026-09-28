@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Check as CheckIcon } from 'lucide-react'
 import { call, on } from '@/lib/bridge'
-import { POPUP_PAD, type PopupItem, type PopupPayload } from '@/lib/popup'
+import type { PopupItem, PopupPayload } from '@/lib/popup'
 import { cn } from '@/lib/utils'
 
 /**
- * The pop-up window's page: draws one menu (or the notification list) that
- * the main window sent, tells the window how big it is, and reports the pick.
- * Arrow keys, Enter and Escape work as in any menu.
+ * The menu view's page: draws the menu (or the notification list) the shell
+ * sent, says how big it came out so the view can be sized to it, and reports
+ * the pick. Arrow keys, Enter and Escape work as in any menu, and focus
+ * leaving the view (a click on the shell or the Store, another app) closes
+ * it.
  */
 export function PopupApp() {
   const [payload, setPayload] = useState<PopupPayload | null>(null)
   const [seq, setSeq] = useState(0)
   const box = useRef<HTMLDivElement | null>(null)
+  // Focus has reached the view since this menu opened, so losing it means
+  // the reader went somewhere else (and not that it never arrived).
+  const focused = useRef(false)
 
   useEffect(() => {
     const take = (p: PopupPayload | null) => {
@@ -22,34 +27,44 @@ export function PopupApp() {
       html.dataset.radius = p.look.radius
       if (p.look.font) html.dataset.font = p.look.font
       else delete html.dataset.font
+      focused.current = false
       setPayload(p)
       setSeq((n) => n + 1)
     }
-    void call<PopupPayload | null>('popup_payload').then(take)
+    void call<PopupPayload | null>('menu_payload').then(take)
     let stop: (() => void) | undefined
-    void on<PopupPayload>('popup-show', take).then((fn) => (stop = fn))
-    return () => stop?.()
+    let cancelled = false
+    void on<PopupPayload>('menu-show', take).then((fn) => (cancelled ? fn() : (stop = fn)))
+    const onFocus = () => (focused.current = true)
+    const onBlur = () => {
+      if (focused.current) void call('menu_close')
+      focused.current = false
+    }
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      cancelled = true
+      stop?.()
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('blur', onBlur)
+    }
   }, [])
 
-  // Measure after every new payload, once fonts are in, then show.
+  // Measure each new menu once its fonts are in, then have it placed and shown.
+  // offsetWidth/Height, not getBoundingClientRect: the opening animation
+  // scales the box, and a measure mid-scale came out a few pixels short.
   useLayoutEffect(() => {
     if (!payload || !box.current) return
     let cancelled = false
     void document.fonts.ready.then(() => {
-      if (cancelled || !box.current) return
-      const r = box.current.getBoundingClientRect()
-      // The menu itself takes focus, not its first item: nothing is lit until
-      // the pointer or an arrow key picks something. Only once the window is
-      // shown and focused (popup_ready): focusing before that was lost, and
-      // the menu sat there unable to highlight, hear Escape or close.
-      const grab = () => {
-        if (cancelled || !box.current) return
-        window.focus()
-        box.current.focus({ preventScroll: true })
-      }
-      box.current.focus({ preventScroll: true })
-      void call('popup_ready', { width: Math.ceil(r.width) + POPUP_PAD * 2, height: Math.ceil(r.height) + POPUP_PAD * 2 })
-        .then(grab)
+      const el = box.current
+      if (cancelled || !el) return
+      void call('menu_ready', { menu: payload.menu, width: el.offsetWidth, height: el.offsetHeight })
+        .then(() => {
+          if (cancelled || !box.current) return
+          if (document.hasFocus()) focused.current = true
+          box.current.focus({ preventScroll: true })
+        })
         .catch(() => {})
     })
     return () => {
@@ -57,11 +72,11 @@ export function PopupApp() {
     }
   }, [payload, seq])
 
-  const select = useCallback((id: string) => void call('popup_select', { id }), [])
+  const select = useCallback((id: string) => void call('menu_pick', { id }), [])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') return void call('popup_close')
+      if (e.key === 'Escape') return void call('menu_close')
       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
       e.preventDefault()
       const items = [...(box.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])]
@@ -76,30 +91,26 @@ export function PopupApp() {
 
   if (!payload) return null
   return (
-    // A see-through window: the menu is drawn with the reader's own corners,
-    // and its shadow falls into the padding around it.
-    <div style={{ padding: POPUP_PAD }} className="w-fit">
-      <div
-        ref={box}
-        key={seq}
-        role="menu"
-        tabIndex={-1}
-        onPointerEnter={() => void call('popup_hover', { inside: true })}
-        onPointerLeave={() => {
-          box.current?.focus({ preventScroll: true })
-          void call('popup_hover', { inside: false })
-        }}
-        // One item is lit at a time: the pointer moves focus, and focus is the
-        // only highlight - a hover style beside it lit two rows at once.
-        onPointerMove={(e) => {
-          const item = (e.target as HTMLElement).closest<HTMLElement>('[role="menuitem"]:not(:disabled)')
-          if (item && document.activeElement !== item) item.focus({ preventScroll: true })
-        }}
-        className="kryo-pop kryo-radius grid w-max gap-0.5 overflow-hidden border border-border bg-popover p-1 shadow-[0_6px_20px_rgba(0,0,0,0.5)] outline-none"
-        style={payload.kind === 'menu' ? { minWidth: payload.minWidth ?? 200 } : { width: 320 }}
-      >
-        {payload.kind === 'menu' ? <Items items={payload.items} onSelect={select} /> : <InboxList payload={payload} onSelect={select} />}
-      </div>
+    <div
+      ref={box}
+      key={seq}
+      role="menu"
+      tabIndex={-1}
+      onPointerEnter={() => void call('menu_hover', { inside: true })}
+      onPointerLeave={() => {
+        box.current?.focus({ preventScroll: true })
+        void call('menu_hover', { inside: false })
+      }}
+      // One item is lit at a time: the pointer moves focus, and focus is the
+      // only highlight, so the keyboard and the pointer never light two rows.
+      onPointerMove={(e) => {
+        const item = (e.target as HTMLElement).closest<HTMLElement>('[role="menuitem"]:not(:disabled)')
+        if (item && document.activeElement !== item) item.focus({ preventScroll: true })
+      }}
+      className="grid w-max gap-0.5 overflow-hidden border border-border bg-popover p-1 outline-none"
+      style={payload.kind === 'menu' ? { minWidth: payload.minWidth ?? 200 } : { width: 320 }}
+    >
+      {payload.kind === 'menu' ? <Items items={payload.items} onSelect={select} /> : <InboxList payload={payload} onSelect={select} />}
     </div>
   )
 }
@@ -122,7 +133,7 @@ function Items({ items, onSelect }: { items: PopupItem[]; onSelect: (id: string)
             disabled={item.disabled}
             onClick={() => onSelect(item.id)}
             className={cn(
-              'flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs outline-none transition-colors disabled:opacity-40',
+              'flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs outline-none disabled:opacity-40',
               item.danger
                 ? 'text-destructive focus:bg-destructive focus:text-destructive-foreground'
                 : 'text-foreground focus:bg-primary focus:text-primary-foreground',
@@ -148,13 +159,13 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
   const { inbox, menu } = payload
   return (
     <>
-      <div className="flex items-center justify-between px-3 py-2">
+      <div className="flex items-center justify-between gap-3 py-1 pl-3 pr-1">
         <span className="text-[10px] uppercase tracking-[0.25em] text-primary">Notifications</span>
         {inbox.unreadCount ? (
           <button
             type="button"
             role="menuitem"
-            className="kryo-square text-[10px] uppercase tracking-wider text-muted-foreground outline-none focus:text-foreground"
+            className="px-2.5 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground outline-none focus:bg-secondary focus:text-foreground"
             onClick={() => onSelect(`${menu}:read`)}
           >
             Mark all read
@@ -162,7 +173,7 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
         ) : null}
       </div>
       {inbox.notifications.length === 0 ? (
-        <p className="px-3 pb-3 text-xs text-muted-foreground">Nothing new.</p>
+        <p className="px-3 pb-3 pt-1 text-xs text-muted-foreground">Nothing new.</p>
       ) : (
         inbox.notifications.map((n, i) => (
           <button
@@ -170,7 +181,7 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
             type="button"
             role="menuitem"
             onClick={() => onSelect(`${menu}:open:${i}`)}
-            className="flex w-full gap-2.5 px-3 py-2 text-left outline-none transition-colors focus:bg-secondary"
+            className="flex w-full gap-2.5 px-3 py-2 text-left outline-none focus:bg-secondary"
           >
             <span className={cn('mt-1.5 size-1.5 shrink-0 rounded-full', n.readAt ? 'bg-transparent' : 'bg-primary')} />
             <span className="min-w-0">
@@ -180,14 +191,14 @@ function InboxList({ payload, onSelect }: { payload: Extract<PopupPayload, { kin
           </button>
         ))
       )}
-      <div className="mt-1 border-t border-border">
+      <div className="mt-0.5 border-t border-border pt-0.5">
         <button
           type="button"
           role="menuitem"
-          className="kryo-square w-full px-3 py-2 text-left text-[10px] uppercase tracking-wider text-muted-foreground outline-none focus:text-foreground"
+          className="w-full px-3 py-2 text-left text-[10px] uppercase tracking-wider text-muted-foreground outline-none focus:bg-secondary focus:text-foreground"
           onClick={() => onSelect(`${menu}:all`)}
         >
-          See all
+          See all notifications
         </button>
       </div>
     </>

@@ -4,7 +4,7 @@ import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '
 import { errorText } from '@/lib/bridge'
 import { settingsApi, useSettings, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
-import { browserNavigate, catalogUrl, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
+import { browserNavigate, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
@@ -140,12 +140,11 @@ function Rail({ title, items, current, onSection }: { title: string; items: Rail
 
 /**
  * kryo.to's settings in the pane: the Store's web view, moved here and sent
- * to the category. It goes back where it was, and to the page it was on,
- * when you leave.
+ * to the category. It goes back to its own place when you leave; the Store
+ * returns to its page when it is next shown (Shell follows its history).
  */
 function WebPane({ fragment, page }: { fragment: string; page: BrowserPageState }) {
   const slot = useRef<HTMLDivElement | null>(null)
-  const returnTo = useRef<string | null>(null)
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
@@ -155,16 +154,12 @@ function WebPane({ fragment, page }: { fragment: string; page: BrowserPageState 
       const r = el.getBoundingClientRect()
       if (r.width > 2 && r.height > 2) void mountStore(STORE_HOME, { x: r.left, y: r.top, width: r.width, height: r.height })
     }
-    void catalogUrl()
-      .then((u) => (returnTo.current = /kryo\.to\/settings/.test(u) ? null : u))
-      .catch(() => {})
     place()
     const ro = new ResizeObserver(place)
     ro.observe(el)
     return () => {
       ro.disconnect()
       placeMainStore()
-      if (returnTo.current) void browserNavigate(returnTo.current).catch(() => {})
     }
   }, [])
 

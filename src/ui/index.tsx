@@ -251,7 +251,7 @@ export function useDismiss(open: boolean, ref: React.RefObject<HTMLElement | nul
 /**
  * A trigger with a drop-down menu under it.
  *
- * With `native` (a menu id), in the app the menu opens in the pop-up window
+ * With `native` (a menu id), in the app the menu opens in the menu view
  * (`lib/popup.ts`) so it can sit over the Store; `nativeOpen` does the opening
  * for anything richer than a list. In the browser preview it falls back to
  * the page menu below.
@@ -261,7 +261,6 @@ export function MenuButton({
   items,
   className,
   align = 'left',
-  onOpenChange,
   label,
   panel,
   native,
@@ -271,37 +270,42 @@ export function MenuButton({
   items?: MenuEntry[]
   className: string
   align?: 'left' | 'right'
-  onOpenChange?: (open: boolean) => void
   label?: string
   /** Custom panel content instead of `items`. */
   panel?: (close: () => void) => ReactNode
   native?: string
   nativeOpen?: (anchor: DOMRect) => void
 }) {
-  const [open, setOpenState] = useState(false)
+  const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
-  const setOpen = (next: boolean) => {
-    setOpenState(next)
-    onOpenChange?.(next)
-  }
-  useDismiss(open && !native, ref, () => setOpen(false))
+  useDismiss(open, ref, () => setOpen(false))
   const nativeOpenNow = useNativeOpen(native)
   const useNative = !!native && isTauri()
+  const openNative = (el: HTMLElement) => {
+    const anchor = el.getBoundingClientRect()
+    if (nativeOpen) nativeOpen(anchor)
+    else void openMenu(native!, anchor, items ?? [], align)
+  }
   return (
     <div ref={ref} className="relative flex">
       <button
         type="button"
         className={className}
+        data-menu={native}
         aria-haspopup="menu"
         aria-expanded={useNative ? nativeOpenNow : open}
         aria-label={label}
         onClick={(e) => {
           if (!useNative) return setOpen(!open)
-          if (nativeOpenNow) return closeMenu()
-          if (justClosed(native!)) return
-          const anchor = e.currentTarget.getBoundingClientRect()
-          if (nativeOpen) nativeOpen(anchor)
-          else void openMenu(native!, anchor, items ?? [], align)
+          // A second press on the trigger closes its menu.
+          if (nativeOpenNow || justClosed(native!)) return closeMenu()
+          openNative(e.currentTarget)
+        }}
+        // Like a menu bar: with one of its menus open, pointing at a sibling
+        // (same id prefix, `title:...`) opens that one instead.
+        onPointerEnter={(e) => {
+          const cur = popupOpen()
+          if (useNative && cur && cur !== native && cur.split(':')[0] === native!.split(':')[0]) openNative(e.currentTarget)
         }}
       >
         {trigger}
@@ -315,7 +319,7 @@ export function MenuButton({
   )
 }
 
-/** Whether the pop-up window is showing this menu id right now. */
+/** Whether the menu view is showing this menu id right now. */
 export function useNativeOpen(menu: string | undefined) {
   const [open, setOpen] = useState(() => !!menu && popupOpen() === menu)
   useEffect(() => {

@@ -180,7 +180,7 @@ pub async fn storage_overview(app: AppHandle) -> Result<StorageOverview, String>
 }
 
 /// Add a library folder. Made if it does not exist yet.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn storage_add_folder(app: AppHandle, path: String) -> Result<(), String> {
     let path = path.trim().to_string();
     if path.is_empty() {
@@ -200,7 +200,7 @@ pub fn storage_add_folder(app: AppHandle, path: String) -> Result<(), String> {
 /// Stop using a library folder. Refused while games are installed in it, and
 /// for the default: those have to be moved or uninstalled first. The folder
 /// itself stays on disk.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn storage_remove_folder(app: AppHandle, path: String) -> Result<(), String> {
     let mut s = settings::load(&app);
     if same_path(&path, &s.library_dir) {
@@ -221,7 +221,7 @@ pub fn storage_remove_folder(app: AppHandle, path: String) -> Result<(), String>
 }
 
 /// Make a folder the one new games install into.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn storage_set_default(app: AppHandle, path: String) -> Result<(), String> {
     let mut s = settings::load(&app);
     if !settings::all_folders(&s).iter().any(|f| same_path(f, &path)) {

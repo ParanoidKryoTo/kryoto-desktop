@@ -1,17 +1,16 @@
 //! The client's life on the desktop: one copy running at a time, the tray icon,
-//! closing to the tray, starting with the computer, and the pop-up window that
-//! menus open in.
+//! closing to the tray, and starting with the computer.
 
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl, WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, WindowEvent,
 };
 
 /* ── One copy at a time ───────────────────────────────────── */
@@ -124,7 +123,7 @@ pub fn shell_ready(ready: bool) {
 /// view, the Store's pages and Cloudflare's challenge frame included, and
 /// Turnstile reads a replaced browser API as a tampered browser. Downloads then
 /// failed with "Could not verify this browser".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn os_notify(app: AppHandle, title: String, body: Option<String>) {
     let mut note = notify_rust::Notification::new();
     note.summary(&title);
@@ -232,36 +231,67 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 }
 
 /// The main window's close button: to the tray once signed in (Steam's
-/// default), unless Settings says quit.
+/// default), unless Settings says quit. A move or resize closes an open menu
+/// and tells the shell when the window became (or stopped being) maximized or
+/// full screen, so the title bar never has to ask on every resize.
 pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &WindowEvent) {
+    let app = window.app_handle();
     match event {
         WindowEvent::CloseRequested { api, .. } => {
-            let app = window.app_handle();
             let to_tray = SHELL_READY.load(Ordering::SeqCst) && TRAY_OK.load(Ordering::SeqCst);
             if to_tray && crate::settings::load(app).close_to_tray {
                 api.prevent_close();
-                hide_popup(app);
+                crate::menus::close(app);
                 let _ = window.hide();
             } else {
                 app.exit(0);
             }
         }
         // Only a real move or resize: Linux window managers send the same
-        // geometry again on focus and stacking changes (the pop-up showing is
-        // one), which closed every menu the moment it opened.
+        // geometry again on focus and stacking changes.
         WindowEvent::Moved(p) => {
             if changed(&LAST_POS, (p.x, p.y)) {
-                hide_popup(window.app_handle());
+                crate::menus::close(app);
             }
         }
         WindowEvent::Resized(s) => {
             if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) {
-                hide_popup(window.app_handle());
+                crate::menus::close(app);
+                report_window_state(window);
             }
         }
-        WindowEvent::Focused(false) => {}
         _ => {}
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowState {
+    maximized: bool,
+    fullscreen: bool,
+}
+
+static LAST_STATE: Mutex<Option<WindowState>> = Mutex::new(None);
+
+fn window_state<R: Runtime>(window: &tauri::Window<R>) -> WindowState {
+    WindowState {
+        maximized: window.is_maximized().unwrap_or(false),
+        fullscreen: window.is_fullscreen().unwrap_or(false),
+    }
+}
+
+fn report_window_state<R: Runtime>(window: &tauri::Window<R>) {
+    let now = window_state(window);
+    let Ok(mut last) = LAST_STATE.lock() else { return };
+    if last.replace(now) != Some(now) {
+        let _ = window.app_handle().emit_to("main", "window-state", now);
+    }
+}
+
+/// Whether the main window is maximized or full screen right now.
+#[tauri::command]
+pub fn window_state_get(window: tauri::Window) -> WindowState {
+    window_state(&window)
 }
 
 static LAST_POS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
@@ -361,188 +391,4 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
             _ => Ok(()),
         }
     }
-}
-
-/* ── The pop-up menu window ───────────────────────────────── */
-
-// The Store is a native web view laid over the shell, so nothing the shell
-// draws can appear on top of it. Menus that open over it (the title bar's, the
-// nav tabs', the bell's) are drawn in a small borderless window of their own
-// instead, owned by the main window so it always sits above it. The shell
-// sends what to draw; the pop-up draws it, says how big it came out, and
-// reports what was picked. The Store keeps working the whole time.
-
-/// The pop-up is a single-view window (so it can be see-through, and the menu
-/// can have the reader's own corners and a soft shadow). Windows are looked up
-/// with `get_window`: the main window holds more than one web view, and
-/// `get_webview_window` only finds single-view ones.
-const POPUP_WINDOW: &str = "popup";
-const POPUP: &str = "popup";
-
-#[derive(Default)]
-pub struct Popup {
-    payload: Mutex<Option<serde_json::Value>>,
-    /// Where the shell asked for it, in screen logical pixels, and which edge
-    /// of the anchor it hangs from (a menu near the right edge grows left).
-    anchor: Mutex<(f64, f64, bool)>,
-}
-
-#[derive(Clone, Serialize)]
-struct PopupClosed {
-    menu: Option<String>,
-}
-
-fn menu_id(payload: &Option<serde_json::Value>) -> Option<String> {
-    payload.as_ref().and_then(|p| p["menu"].as_str()).map(String::from)
-}
-
-pub fn hide_popup<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(w) = app.get_window(POPUP_WINDOW) {
-        if w.is_visible().unwrap_or(false) {
-            let _ = w.hide();
-            let menu = app.state::<Popup>().payload.lock().ok().and_then(|p| menu_id(&p));
-            let _ = app.emit_to("main", "popup-closed", PopupClosed { menu });
-        }
-    }
-}
-
-/// Open a menu at `x`,`y` in the main window (logical pixels from its top-left
-/// corner). `right` hangs it from that point's left instead (right-aligned).
-#[tauri::command]
-pub async fn popup_open(app: AppHandle, x: f64, y: f64, right: bool, payload: serde_json::Value) -> Result<(), String> {
-    let main = app.get_window("main").ok_or("The main window is gone.")?;
-    let scale = main.scale_factor().map_err(|e| e.to_string())?;
-    let origin = main.inner_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
-    let (sx, sy) = (origin.x + x, origin.y + y);
-    let state = app.state::<Popup>();
-    *state.payload.lock().map_err(|_| "popup lock")? = Some(payload.clone());
-    *state.anchor.lock().map_err(|_| "popup lock")? = (sx, sy, right);
-    POPUP_GEN.fetch_add(1, Ordering::SeqCst);
-
-    if let Some(w) = app.get_window(POPUP_WINDOW) {
-        let _ = w.hide();
-        let _ = w.set_position(LogicalPosition::new(sx, sy));
-        app.emit_to(POPUP, "popup-show", payload).map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    // First menu of the session: make the window. It asks for its payload
-    // when its page has loaded (`popup_payload`), so nothing is lost to an
-    // event sent before anything was listening.
-    let builder = tauri::WebviewWindowBuilder::new(&app, POPUP, WebviewUrl::default())
-        .title("Kryoto menu")
-        .decorations(false)
-        .transparent(true)
-        .resizable(false)
-        .skip_taskbar(true)
-        .shadow(false)
-        .visible(false)
-        .focused(true)
-        .inner_size(220.0, 120.0)
-        .position(sx, sy);
-    // Owned by the main window, so it stays above it and goes with it.
-    #[cfg(windows)]
-    let builder = builder.owner_raw(main.hwnd().map_err(|e| e.to_string())?);
-    #[cfg(not(windows))]
-    let builder = builder.always_on_top(true);
-    let w = builder.build().map_err(|e| e.to_string())?;
-    let app2 = app.clone();
-    w.on_window_event(move |event| {
-        if let WindowEvent::Focused(false) = event {
-            hide_if_left(&app2);
-        }
-    });
-    Ok(())
-}
-
-/// Bumped on every open, so a late focus check never hides the next menu.
-static POPUP_GEN: AtomicU64 = AtomicU64::new(0);
-
-/// "Focus left the pop-up" also fires when focus only moves from the window
-/// into its own web view (popup_ready does exactly that), which closed every
-/// menu the instant it opened. Look again a moment later and hide only if
-/// the pop-up really is no longer the window in front.
-fn hide_if_left<R: Runtime>(app: &AppHandle<R>) {
-    let gen = POPUP_GEN.load(Ordering::SeqCst);
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(60));
-        if POPUP_GEN.load(Ordering::SeqCst) != gen || popup_in_front(&app) {
-            return;
-        }
-        hide_popup(&app);
-    });
-}
-
-#[cfg(windows)]
-fn popup_in_front<R: Runtime>(app: &AppHandle<R>) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-    let Some(w) = app.get_window(POPUP_WINDOW) else { return false };
-    let Ok(hwnd) = w.hwnd() else { return false };
-    // SAFETY: no arguments; returns a handle or null.
-    let front = unsafe { GetForegroundWindow() };
-    front as isize == hwnd.0 as isize
-}
-
-#[cfg(not(windows))]
-fn popup_in_front<R: Runtime>(app: &AppHandle<R>) -> bool {
-    app.get_window(POPUP_WINDOW).and_then(|w| w.is_focused().ok()).unwrap_or(false)
-}
-
-#[tauri::command]
-pub fn popup_payload(popup: tauri::State<'_, Popup>) -> Option<serde_json::Value> {
-    popup.payload.lock().ok().and_then(|p| p.clone())
-}
-
-/// The pop-up has drawn itself at this size: place it (kept on the monitor)
-/// and show it.
-#[tauri::command]
-pub fn popup_ready(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
-    let w = app.get_window(POPUP_WINDOW).ok_or("no popup")?;
-    let (mut x, mut y, right) = *app.state::<Popup>().anchor.lock().map_err(|_| "popup lock")?;
-    if right {
-        x -= width;
-    }
-    if let Ok(Some(m)) = w.current_monitor().or_else(|_| w.primary_monitor()) {
-        let scale = m.scale_factor();
-        let pos = m.position().to_logical::<f64>(scale);
-        let size = m.size().to_logical::<f64>(scale);
-        x = x.min(pos.x + size.width - width - 4.0).max(pos.x + 4.0);
-        if y + height > pos.y + size.height - 4.0 {
-            y = (pos.y + size.height - height - 4.0).max(pos.y + 4.0);
-        }
-    }
-    w.set_size(LogicalSize::new(width.max(40.0), height.max(20.0))).map_err(|e| e.to_string())?;
-    w.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
-    w.show().map_err(|e| e.to_string())?;
-    // The window AND the page inside it: focusing only the window left the web
-    // view without keyboard focus, so the menu showed but did nothing - no
-    // highlight under the pointer (it is focus-driven), no Escape, and no blur
-    // to close it on a click elsewhere - until it was clicked once.
-    let _ = w.set_focus();
-    if let Some(view) = app.get_webview(POPUP) {
-        let _ = view.set_focus();
-    }
-    Ok(())
-}
-
-/// Something in the menu was picked. The shell runs it.
-#[tauri::command]
-pub fn popup_select(app: AppHandle, id: String) {
-    if let Some(w) = app.get_window(POPUP_WINDOW) {
-        let _ = w.hide();
-    }
-    let _ = app.emit_to("main", "popup-select", id);
-    let menu = app.state::<Popup>().payload.lock().ok().and_then(|p| menu_id(&p));
-    let _ = app.emit_to("main", "popup-closed", PopupClosed { menu });
-}
-
-#[tauri::command]
-pub fn popup_close(app: AppHandle) {
-    hide_popup(&app);
-}
-
-/// The pointer went into (or left) the pop-up, for menus that open on hover.
-#[tauri::command]
-pub fn popup_hover(app: AppHandle, inside: bool) {
-    let _ = app.emit_to("main", "popup-hover", inside);
 }

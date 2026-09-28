@@ -1,6 +1,7 @@
+import { useEffect, useState } from 'react'
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { call, isTauri } from '@/lib/bridge'
+import { call, isTauri, on } from '@/lib/bridge'
 
 export { isTauri }
 
@@ -59,16 +60,44 @@ export async function applyWindow(kind: WindowKind) {
   await win.center()
 }
 
+/* ── Window controls ───────────────────────────────────── */
+
+export type WindowState = { maximized: boolean; fullscreen: boolean }
+
+const NORMAL: WindowState = { maximized: false, fullscreen: false }
+
+/**
+ * Whether the window is maximized or full screen, as it changes. The native
+ * side says so once per change (`window-state`), so nothing here asks the
+ * window again on every step of a resize.
+ */
+export function useWindowState(): WindowState {
+  const [state, setState] = useState<WindowState>(NORMAL)
+  useEffect(() => {
+    if (!isTauri()) return
+    let stop: (() => void) | undefined
+    let cancelled = false
+    void call<WindowState>('window_state_get').then((s) => !cancelled && setState(s)).catch(() => {})
+    void on<WindowState>('window-state', setState).then((fn) => (cancelled ? fn() : (stop = fn)))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [])
+  return state
+}
+
 export const minimizeWindow = () => (isTauri() ? getCurrentWindow().minimize() : Promise.resolve())
+export const toggleMaximize = () => (isTauri() ? getCurrentWindow().toggleMaximize() : Promise.resolve())
+/** The close button: to the tray or quit, as Settings says (system.rs). */
 export const closeWindow = () => (isTauri() ? getCurrentWindow().close() : Promise.resolve())
-/** Quit for real (the close button may only hide to the tray). */
-export const exitApp = () => (isTauri() ? call<void>('app_exit') : Promise.resolve())
-export async function toggleMaximize() {
+export async function toggleFullscreen() {
   if (!isTauri()) return
   const win = getCurrentWindow()
-  if (await win.isMaximized()) await win.unmaximize()
-  else await win.maximize()
+  await win.setFullscreen(!(await win.isFullscreen()))
 }
+/** Quit for real (the close button may only hide to the tray). */
+export const exitApp = () => (isTauri() ? call<void>('app_exit') : Promise.resolve())
 
 /* ── Store web view ─────────────────────────────────────── */
 

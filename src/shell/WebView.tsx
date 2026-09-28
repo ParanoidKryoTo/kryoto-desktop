@@ -47,8 +47,8 @@ export function WebSlot({ page, onRetry }: { page: BrowserPageState; onRetry: ()
   // dialog - where a loading bar would read as "the Store is stuck".
   const [shown, setShown] = useState(false)
   useEffect(() => {
-    if (!page.loading && page.progress >= 100) setShown(true)
-  }, [page.loading, page.progress])
+    if (!page.loading) setShown(true)
+  }, [page.loading])
   return (
     <div ref={slot} className="absolute inset-0 grid place-content-center justify-items-center gap-4 bg-background text-center">
       {problem ? (
@@ -73,6 +73,32 @@ export function WebSlot({ page, onRetry }: { page: BrowserPageState; onRetry: ()
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * A thin line along the pill's foot while a page loads. The web view only
+ * says "started" and "finished", so it eases towards 90% and then completes;
+ * it animates here, so a load redraws this line and not the whole client.
+ */
+function LoadLine({ loading }: { loading: boolean }) {
+  const [progress, setProgress] = useState<number | null>(null)
+  useEffect(() => {
+    if (!loading) {
+      setProgress((p) => (p === null ? null : 100))
+      const t = window.setTimeout(() => setProgress(null), 250)
+      return () => window.clearTimeout(t)
+    }
+    setProgress(8)
+    const t = window.setInterval(() => setProgress((p) => Math.min(90, (p ?? 8) + Math.max(0.5, (90 - (p ?? 8)) * 0.08))), 120)
+    return () => window.clearInterval(t)
+  }, [loading])
+  if (progress === null) return null
+  return (
+    <span
+      className="absolute bottom-0 left-0 h-px bg-foreground transition-[width,opacity] duration-200"
+      style={{ width: `${progress}%`, opacity: progress >= 100 ? 0 : 1 }}
+    />
   )
 }
 
@@ -125,12 +151,7 @@ export function UrlPill({
         >
           {page.loading ? <X className="size-3.5" /> : <RotateCw className="size-3.5" />}
         </button>
-        {page.loading ? (
-          <span
-            className="absolute bottom-0 left-0 h-px bg-foreground transition-[width] duration-150"
-            style={{ width: `${page.progress}%` }}
-          />
-        ) : null}
+        <LoadLine loading={page.loading} />
       </div>
       {onLibrary ? (
         <Button variant={inLibrary ? 'outline' : 'primary'} onClick={onLibrary}>

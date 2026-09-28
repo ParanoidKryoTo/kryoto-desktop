@@ -159,15 +159,34 @@ pub fn same_path(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
+/// The settings as last read or written. `load` runs on every Store
+/// navigation and page report, which is no reason to go to the disk each time.
+static CACHE: std::sync::RwLock<Option<Settings>> = std::sync::RwLock::new(None);
+
 pub fn write<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), String> {
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     let target = file(app)?;
     let tmp = target.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, target).map_err(|e| e.to_string())
+    std::fs::rename(tmp, target).map_err(|e| e.to_string())?;
+    if let Ok(mut cache) = CACHE.write() {
+        *cache = Some(settings.clone());
+    }
+    Ok(())
 }
 
 pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
+    if let Some(s) = CACHE.read().ok().and_then(|c| c.clone()) {
+        return s;
+    }
+    let s = read(app);
+    if let Ok(mut cache) = CACHE.write() {
+        *cache = Some(s.clone());
+    }
+    s
+}
+
+fn read<R: Runtime>(app: &AppHandle<R>) -> Settings {
     let mut s: Settings = file(app)
         .ok()
         .and_then(|f| std::fs::read_to_string(f).ok())
@@ -180,12 +199,12 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     s
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_get(app: AppHandle) -> Settings {
     load(&app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings, String> {
     if settings.library_dir.trim().is_empty() {
         return Err("Pick a folder for the library.".into());

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   ArrowUpRight,
   FolderOpen,
@@ -39,20 +38,14 @@ import { setSavedStatus, useSaved } from '@/hooks/useSaved'
 import type { useBrowserPage } from '@/hooks/useBrowserPage'
 import { useDownloads } from '@/lib/downloads'
 import { useSettings } from '@/lib/settings'
+import * as nav from '@/lib/history'
+import type { View } from '@/lib/history'
 import { call, errorText, on } from '@/lib/bridge'
 import { logError } from '@/lib/log'
 import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
 import { entryIsVr, entryLabel, library, playTarget, type LibraryGame } from '@/lib/library'
-import { exitApp, isTauri, navigateCatalog, openExternal, setStoreVisible, signOut } from '@/lib/window'
+import { exitApp, isTauri, openExternal, setStoreVisible, signOut, toggleFullscreen } from '@/lib/window'
 
-type View =
-  | { kind: 'web' }
-  | { kind: 'home' }
-  | { kind: 'game'; id: string }
-  | { kind: 'downloads' }
-  | { kind: 'friends' }
-  | { kind: 'community' }
-  | { kind: 'settings'; section: SettingsSection }
 type Browser = ReturnType<typeof useBrowserPage>
 
 type Overlay =
@@ -61,11 +54,6 @@ type Overlay =
   | { kind: 'props'; id: string }
   | { kind: 'uninstall'; id: string }
   | { kind: 'about' }
-
-const sameView = (a: View, b: View) =>
-  a.kind === b.kind &&
-  (a.kind !== 'game' || a.id === (b as { id: string }).id) &&
-  (a.kind !== 'settings' || a.section === (b as { section: SettingsSection }).section)
 
 /** Which top tab a kryo.to address lights, the way Steam lights its nav. */
 function tabForUrl(url: string, catalogEndpoint?: string): TopTab {
@@ -103,47 +91,55 @@ function slugOnPage(url: string, catalogEndpoint?: string): string | null {
 
 export function Shell({ startPage, account, browser }: { startPage: 'store' | 'library'; account: Account; browser: Browser }) {
   const lib = useLibrary()
-  const { inbox, news } = useInbox()
+  const { inbox, news, markAllRead } = useInbox()
   const dl = useDownloads()
   const saved = useSaved()
   const { state: page, actions: web } = browser
   const { toasts, push, dismiss } = useToasts()
   const guest = !!account.guest
 
-  /* ── History: the Library and the Store share the arrows ── */
-  const [history, setHistory] = useState<{ stack: View[]; index: number }>({
-    stack: [startPage === 'store' ? { kind: 'web' } : { kind: 'home' }],
-    index: 0,
-  })
-  const view: View = history.stack[history.index] ?? { kind: 'home' }
-  const go = useCallback((next: View) => {
-    setHistory((h) => {
-      const current = h.stack[h.index]
-      if (current && sameView(current, next)) return h
-      const stack = [...h.stack.slice(0, h.index + 1), next].slice(-50)
-      return { stack, index: stack.length - 1 }
-    })
-  }, [])
+  const settings = useSettings()
+  const catalogBase = (settings?.catalogEndpoint?.trim() || 'https://kryo.to').replace(/\/+$/, '')
+
+  /* ── History: one pair of arrows for the whole client (lib/history.ts) ── */
+  const [history, setHistory] = useState(() => nav.start(startPage === 'store' ? { kind: 'web', url: page.url } : { kind: 'home' }))
+  const view: View = nav.current(history)
+  const go = useCallback((next: View) => setHistory((h) => nav.go(h, next)), [])
+  /** A kryo.to path (or full address) in the Store; none resumes the page it is on. */
   const openWeb = useCallback(
-    (path?: string) => {
-      go({ kind: 'web' })
-      if (path) void navigateCatalog(path).catch(() => {})
-    },
-    [go],
+    (path?: string) => go({ kind: 'web', url: !path ? page.url : /^https?:/.test(path) ? path : `${catalogBase}${path}` }),
+    [go, page.url, catalogBase],
   )
-  const canBack = (view.kind === 'web' && page.canGoBack) || history.index > 0
-  const canForward = (view.kind === 'web' && page.canGoForward) || history.index < history.stack.length - 1
-  // One pair of arrows for everything: inside the Store they step through its
-  // pages first, then back out into the Library - Steam's model. kryo.to
-  // hides its own back button inside the client, so there is only this pair.
-  const back = useCallback(() => {
-    if (view.kind === 'web' && page.canGoBack) web.back()
-    else setHistory((h) => ({ ...h, index: Math.max(0, h.index - 1) }))
-  }, [view.kind, page.canGoBack, web])
-  const forward = useCallback(() => {
-    if (view.kind === 'web' && page.canGoForward) web.forward()
-    else setHistory((h) => ({ ...h, index: Math.min(h.stack.length - 1, h.index + 1) }))
-  }, [view.kind, page.canGoForward, web])
+  const back = useCallback(() => setHistory((h) => nav.step(h, -1)), [])
+  const forward = useCallback(() => setHistory((h) => nav.step(h, 1)), [])
+  const canBack = history.index > 0
+  const canForward = history.index < history.stack.length - 1
+
+  // The Store's web view follows the entry being shown. Where the page's own
+  // history already has it one step away, that step is taken (instant, from
+  // its cache); anything else is loaded. `pending` is where it was sent, so
+  // a redirect on the way replaces the entry instead of adding one.
+  const pending = useRef<{ url: string; at: number } | null>(null)
+  useEffect(() => {
+    if (view.kind !== 'web' || nav.sameUrl(view.url, page.url)) return
+    const p = pending.current
+    if (p && nav.sameUrl(p.url, view.url) && Date.now() - p.at < 15_000) return
+    pending.current = { url: view.url, at: Date.now() }
+    if (page.back && nav.sameUrl(page.back, view.url)) web.back()
+    else if (page.forward && nav.sameUrl(page.forward, view.url)) web.forward()
+    else web.navigate(view.url)
+    // Only when the entry changes: the page moving on its own is its report's job.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view])
+  useEffect(
+    () =>
+      web.onNav((url, how) => {
+        const p = pending.current
+        pending.current = null
+        setHistory((h) => nav.webMoved(h, url, how, !!p && Date.now() - p.at < 15_000))
+      }),
+    [web],
+  )
   // The mouse's side buttons and Alt+arrows, anywhere in the client's own
   // chrome (inside the Store, the web view handles them itself).
   useEffect(() => {
@@ -210,8 +206,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'F11' || !isTauri()) return
       e.preventDefault()
-      const win = getCurrentWindow()
-      void win.isFullscreen().then((f) => win.setFullscreen(!f))
+      void toggleFullscreen()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -236,7 +231,6 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   // A kryo.to game closing adds the session to the account's play time, and
   // one starting or closing tells kryo.to what is being played right now
   // (Settings > Windows can turn both off).
-  const settings = useSettings()
   const gamesRef = useRef(lib.games)
   gamesRef.current = lib.games
   const shareRef = useRef(true)
@@ -396,7 +390,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
         { separator: true },
         { label: 'Reload page', hint: 'Ctrl R', disabled: view.kind !== 'web', onSelect: () => web.reload() },
-        { label: 'Full screen', hint: 'F11', onSelect: () => void getCurrentWindow().setFullscreen(true).catch(() => {}) },
+        { label: 'Full screen', hint: 'F11', onSelect: () => void toggleFullscreen().catch(() => {}) },
       ],
     },
     {
@@ -431,6 +425,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   // profile, the blog), goes to its home.
   const openStore = () =>
     openWeb(view.kind !== 'web' && tabForUrl(page.url, settings?.catalogEndpoint) === 'store' ? undefined : '/')
+  const webUrl = view.kind === 'web' ? view.url : page.url
   const tabs: NavTabSpec[] = [
     {
       id: 'store',
@@ -485,7 +480,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   ]
   const currentTab: TopTab =
     view.kind === 'web'
-      ? tabForUrl(page.url, settings?.catalogEndpoint)
+      ? tabForUrl(webUrl, settings?.catalogEndpoint)
       : view.kind === 'friends' || view.kind === 'settings'
         ? 'profile'
         : view.kind === 'community'
@@ -505,7 +500,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       ]
 
   /* ── Store helpers ── */
-  const pageSlug = view.kind === 'web' ? slugOnPage(page.url, settings?.catalogEndpoint) : null
+  const pageSlug = view.kind === 'web' ? slugOnPage(webUrl, settings?.catalogEndpoint) : null
   const pageGame = pageSlug ? (lib.games.find((g) => g.slug === pageSlug) ?? null) : null
   const addFromPage = pageSlug
     ? () => (pageGame ? go({ kind: 'game', id: pageGame.id }) : setOverlay({ kind: 'add', slug: pageSlug }))
@@ -650,7 +645,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         accountMenu={accountMenu}
         onNews={() => openWeb('/changelog')}
         onOpenNotification={openNotification}
-        onMarkRead={() => void call('store_mark_read').catch(() => {})}
+        onMarkRead={markAllRead}
         onAllNotifications={() => openWeb('/notifications')}
       />
       <NavBar

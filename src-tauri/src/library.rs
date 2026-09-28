@@ -124,14 +124,14 @@ fn slugify(title: &str) -> String {
     if s.is_empty() { "game".into() } else { s }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn library_list(app: AppHandle) -> Result<Vec<LibraryGame>, String> {
     load(&app)
 }
 
 /// Add a game from an exe on disk. `game` carries whatever the caller already
 /// knows (title, kryo.to link, Steam entries); the folder is worked out here.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn library_add(app: AppHandle, exe_path: String, mut game: LibraryGame) -> Result<LibraryGame, String> {
     let exe = PathBuf::from(&exe_path);
     if !exe.is_file() {
@@ -238,7 +238,7 @@ pub async fn game_disk_size(install_dir: String) -> Result<u64, String> {
 
 /// Save the settings the Properties window edits. Playtime is the app's own
 /// record and is kept from disk, never taken from the window.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn library_save(app: AppHandle, game: LibraryGame) -> Result<LibraryGame, String> {
     update(&app, |games| {
         let slot = games.iter_mut().find(|g| g.id == game.id).ok_or("That game is no longer in the library.")?;
@@ -340,7 +340,7 @@ fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<us
 }
 
 /// The exact line Play would run, for the Properties window.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn game_launch_preview(app: AppHandle, game: LibraryGame, entry: Option<usize>) -> Result<String, String> {
     Ok(plan_for(&app, &game, entry)?.display())
 }
@@ -352,7 +352,7 @@ pub fn game_running(running: State<'_, Running>) -> Vec<String> {
 
 /// Start a game. `entry` is the Steam launch entry picked, or `None` for the
 /// release default.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entry: Option<usize>) -> Result<(), String> {
     if running.0.lock().map(|m| m.contains_key(&id)).unwrap_or(false) {
         return Err("It is already running.".into());
@@ -418,7 +418,7 @@ pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entr
 }
 
 /// Close a running game and everything it started.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn game_stop(running: State<'_, Running>, id: String) -> Result<(), String> {
     let pid = running
         .0
@@ -442,7 +442,7 @@ pub fn game_stop(running: State<'_, Running>, id: String) -> Result<(), String> 
 }
 
 /// Show the game's folder in the file manager.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_folder(path: String) -> Result<(), String> {
     let dir = PathBuf::from(&path);
     if !dir.is_dir() {

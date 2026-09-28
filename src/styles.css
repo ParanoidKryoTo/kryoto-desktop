@@ -339,9 +339,10 @@
   --sidebar-border: oklch(0.27 0.05 350);
 }
 
-/* The pop-up menu's page is only as tall as its menu. */
+/* The menu's page is only as big as its menu. */
 html[data-window='popup'] #root {
   height: auto;
+  width: max-content;
 }
 
 /* A real button gives under the pointer, as on kryo.to (its
@@ -376,7 +377,9 @@ html[data-window='popup'],
 html[data-window='popup'] body {
   background: transparent;
 }
-/* Menu rows follow the reader's corners, up to a size that still reads as a row. */
+/* The menu's view is exactly the menu's size, and a web view cannot be
+   see-through over the Store's (its corners came out black), so the menu is
+   square and only its rows follow the reader's corners. */
 html[data-window='popup'] [role='menuitem'] {
-  border-radius: min(var(--kryo-radius), 10px);
+  border-radius: min(var(--kryo-radius), 6px);
 }

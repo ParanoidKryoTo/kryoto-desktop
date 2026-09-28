@@ -1,10 +1,8 @@
-import { useEffect, useState } from 'react'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Bell, ChevronDown, Expand, Megaphone, Shrink } from 'lucide-react'
 import { MenuButton, MenuList, type MenuEntry } from '@/ui'
 import { KryoMark } from '@/ui/ascii/KryoMark'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
-import { isTauri } from '@/lib/window'
+import { closeWindow, isTauri, minimizeWindow, toggleFullscreen, toggleMaximize, useWindowState } from '@/lib/window'
 import { openInbox } from '@/lib/popup'
 import { cn } from '@/lib/utils'
 import type { Account } from '@/hooks/useAccount'
@@ -15,9 +13,9 @@ import type { Inbox, News } from '@/hooks/useInbox'
  *
  * Left: the mark and the menus (Kryoto, View, Games, Help). Right: what is new
  * on kryo.to, the notification bell, the account, full screen, and the window
- * buttons drawn the way Forge draws them. Everything that is not a control
- * drags the window, and a double-click on it maximises. Menus open in the
- * pop-up window, over the Store, without hiding it.
+ * buttons. Everything that is not a control drags the window, and a
+ * double-click on it maximizes. Menus open in the menu view, over the Store,
+ * without hiding it.
  */
 export function TitleBar({
   account,
@@ -40,30 +38,7 @@ export function TitleBar({
   onMarkRead: () => void
   onAllNotifications: () => void
 }) {
-  const [maximized, setMaximized] = useState(false)
-  const [fullscreen, setFullscreen] = useState(false)
-
-  useEffect(() => {
-    if (!isTauri()) return
-    const win = getCurrentWindow()
-    let off: (() => void) | undefined
-    const sync = () => {
-      void win.isMaximized().then(setMaximized).catch(() => {})
-      void win.isFullscreen().then(setFullscreen).catch(() => {})
-    }
-    sync()
-    void win.onResized(sync).then((fn) => (off = fn))
-    return () => off?.()
-  }, [])
-
-  const act = async (what: 'min' | 'max' | 'close' | 'full') => {
-    if (!isTauri()) return
-    const win = getCurrentWindow()
-    if (what === 'min') return win.minimize()
-    if (what === 'close') return win.close()
-    if (what === 'full') return win.setFullscreen(!(await win.isFullscreen()))
-    await win.toggleMaximize()
-  }
+  const { fullscreen } = useWindowState()
 
   const initial = (account.displayName || account.username || '?').slice(0, 1).toUpperCase()
 
@@ -159,7 +134,7 @@ export function TitleBar({
             type="button"
             aria-label={fullscreen ? 'Leave full screen' : 'Full screen'}
             title={fullscreen ? 'Leave full screen (F11)' : 'Full screen (F11)'}
-            onClick={() => void act('full')}
+            onClick={() => void toggleFullscreen()}
             className="kryo-pill grid size-7 place-items-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
           >
             {fullscreen ? <Shrink className="size-3.5" /> : <Expand className="size-3.5" />}
@@ -167,24 +142,43 @@ export function TitleBar({
         ) : null}
       </div>
 
-      {isTauri() ? (
-        <div className="no-drag flex items-stretch">
-          <WindowButton label="Minimize" onClick={() => void act('min')}>
-            <path d="M0 5h10" />
-          </WindowButton>
-          <WindowButton label={maximized ? 'Restore' : 'Maximize'} onClick={() => void act('max')}>
-            {maximized ? <path d="M2.5 0.5h7v7M0.5 2.5h7v7h-7z" /> : <rect x="0.5" y="0.5" width="9" height="9" />}
-          </WindowButton>
-          <WindowButton label="Close" onClick={() => void act('close')} danger>
-            <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
-          </WindowButton>
-        </div>
-      ) : null}
+      {isTauri() ? <WindowControls /> : null}
     </header>
   )
 }
 
-/** Forge's window buttons: thin drawn glyphs, a red close. */
+/**
+ * Minimize, maximize or restore, and close: the system's own three buttons,
+ * drawn thin and full height, with the red close. Maximize follows the window
+ * (a drag to the screen's top, a double-click on the bar, the keyboard), not
+ * just this button, and hides in full screen, where it means nothing.
+ */
+function WindowControls() {
+  const { maximized, fullscreen } = useWindowState()
+  return (
+    <div className="no-drag flex items-stretch">
+      <WindowButton label="Minimize" onClick={() => void minimizeWindow()}>
+        <path d="M0 5.5h10" />
+      </WindowButton>
+      {fullscreen ? null : (
+        <WindowButton label={maximized ? 'Restore' : 'Maximize'} onClick={() => void toggleMaximize()}>
+          {maximized ? (
+            <>
+              <path d="M2.5 2.5V0.5h7v7h-2" />
+              <rect x="0.5" y="2.5" width="7" height="7" />
+            </>
+          ) : (
+            <rect x="0.5" y="0.5" width="9" height="9" />
+          )}
+        </WindowButton>
+      )}
+      <WindowButton label="Close" onClick={() => void closeWindow()} danger>
+        <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
+      </WindowButton>
+    </div>
+  )
+}
+
 function WindowButton({
   label,
   onClick,
@@ -203,11 +197,19 @@ function WindowButton({
       title={label}
       onClick={onClick}
       className={cn(
-        'kryo-square grid w-11 place-items-center text-muted-foreground transition-colors',
-        danger ? 'hover:bg-[#c42b1c] hover:text-white' : 'hover:bg-secondary hover:text-foreground',
+        'kryo-square grid w-[46px] place-items-center text-muted-foreground transition-colors duration-100',
+        danger ? 'hover:bg-[#c42b1c] hover:text-white active:bg-[#c42b1c]/80' : 'hover:bg-secondary hover:text-foreground active:bg-secondary/70',
       )}
     >
-      <svg viewBox="0 0 10 10" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden>
+      {/* One device pixel wide at any display scale. */}
+      <svg
+        viewBox="0 0 10 10"
+        className="size-2.5 overflow-visible [&_*]:[vector-effect:non-scaling-stroke]"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1"
+        aria-hidden
+      >
         {children}
       </svg>
     </button>

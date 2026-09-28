@@ -100,25 +100,36 @@ function ago(iso: string) {
   return `${Math.round(s / 86400)}d ago`
 }
 
+/**
+ * The last statistics, kept for the session: coming back to the page shows
+ * them at once and refreshes behind them, instead of a loader every visit.
+ */
+let lastStats: { at: number; stats: Stats } | null = null
+const FRESH_MS = 60_000
+
 export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame[]; onGame: (slug: string) => void; onProfile: (username: string) => void }) {
-  const [stats, setStats] = useState<Stats | null>(isTauri() ? null : PREVIEW)
+  const [stats, setStats] = useState<Stats | null>(isTauri() ? (lastStats?.stats ?? null) : PREVIEW)
   const [error, setError] = useState<string | null>(null)
   const showAdult = useShowAdult()
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     if (!isTauri()) return
+    if (!force && lastStats && Date.now() - lastStats.at < FRESH_MS) return
     setError(null)
     try {
-      const res = await fetch(await catalogApiUrl('/api/community/stats'), { cache: 'no-store' })
+      // kryo.to caches these for a minute itself; no need to go around it.
+      const res = await fetch(await catalogApiUrl('/api/community/stats'))
       if (!res.ok) throw new Error(`kryo.to answered ${res.status}`)
-      setStats((await res.json()) as Stats)
+      const next = (await res.json()) as Stats
+      lastStats = { at: Date.now(), stats: next }
+      setStats(next)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
   }, [])
   useEffect(() => {
     void load()
-    const t = window.setInterval(() => void load(), 120_000)
+    const t = window.setInterval(() => void load(true), 120_000)
     return () => window.clearInterval(t)
   }, [load])
 
@@ -136,7 +147,7 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
           <>
             <Label>Community</Label>
             <p className="max-w-sm text-xs text-muted-foreground">The statistics did not load ({error}).</p>
-            <Button onClick={() => void load()}>
+            <Button onClick={() => void load(true)}>
               <RotateCw className="size-3" />
               Try again
             </Button>
@@ -177,7 +188,7 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
           </div>
           <div className="flex items-center gap-3">
             <Caption>updated {ago(stats.generatedAt)}</Caption>
-            <IconButton label="Refresh" onClick={() => void load()}>
+            <IconButton label="Refresh" onClick={() => void load(true)}>
               <RotateCw className="size-3.5" />
             </IconButton>
           </div>

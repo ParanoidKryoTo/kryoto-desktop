@@ -50,7 +50,7 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>('splash')
   const settings = useSettings()
   const account = useAccount()
-  const browser = useBrowserPage('catalog')
+  const browser = useBrowserPage()
   const [guest, setGuestState] = useState(loadGuest)
   const setGuest = useCallback((on: boolean) => {
     saveGuest(on)
