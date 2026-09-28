@@ -100,38 +100,40 @@ export function TitleBar({
           </button>
         ) : null}
 
-        <MenuButton
-          native="bell"
-          label={`Notifications${inbox.unreadCount ? `, ${inbox.unreadCount} unread` : ''}`}
-          align="right"
-          nativeOpen={(anchor) =>
-            void openInbox('bell', anchor, inbox, { open: onOpenNotification, markRead: onMarkRead, all: onAllNotifications })
-          }
-          className="kryo-pill relative grid size-7 place-items-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground aria-expanded:bg-secondary"
-          trigger={
-            <>
-              <Bell className="size-3.5" />
-              {inbox.unreadCount ? (
-                <span className="kryo-pill absolute -right-0.5 -top-0.5 grid h-3.5 min-w-3.5 place-items-center bg-primary px-1 text-[8px] font-bold text-primary-foreground">
-                  {inbox.unreadCount > 9 ? '9+' : inbox.unreadCount}
-                </span>
-              ) : null}
-            </>
-          }
-          panel={(close) => (
-            <div className="w-80">
-              <MenuList
-                onDone={close}
-                items={[
-                  { heading: 'Notifications' },
-                  ...inbox.notifications.map((n) => ({ label: n.title, onSelect: () => onOpenNotification(n.url) })),
-                  { separator: true },
-                  { label: 'See all', onSelect: onAllNotifications },
-                ]}
-              />
-            </div>
-          )}
-        />
+        {account.guest ? null : (
+          <MenuButton
+            native="bell"
+            label={`Notifications${inbox.unreadCount ? `, ${inbox.unreadCount} unread` : ''}`}
+            align="right"
+            nativeOpen={(anchor) =>
+              void openInbox('bell', anchor, inbox, { open: onOpenNotification, markRead: onMarkRead, all: onAllNotifications })
+            }
+            className="kryo-pill relative grid size-7 place-items-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground aria-expanded:bg-secondary"
+            trigger={
+              <>
+                <Bell className="size-3.5" />
+                {inbox.unreadCount ? (
+                  <span className="kryo-pill absolute -right-0.5 -top-0.5 grid h-3.5 min-w-3.5 place-items-center bg-primary px-1 text-[8px] font-bold text-primary-foreground">
+                    {inbox.unreadCount > 9 ? '9+' : inbox.unreadCount}
+                  </span>
+                ) : null}
+              </>
+            }
+            panel={(close) => (
+              <div className="w-80">
+                <MenuList
+                  onDone={close}
+                  items={[
+                    { heading: 'Notifications' },
+                    ...inbox.notifications.map((n) => ({ label: n.title, onSelect: () => onOpenNotification(n.url) })),
+                    { separator: true },
+                    { label: 'See all', onSelect: onAllNotifications },
+                  ]}
+                />
+              </div>
+            )}
+          />
+        )}
 
         <MenuButton
           native="account"

@@ -4,6 +4,8 @@ mod downloads;
 mod launch;
 mod library;
 mod links;
+#[cfg(target_os = "linux")]
+mod linux_overlay;
 mod logging;
 mod online;
 mod settings;
@@ -409,6 +411,8 @@ async fn store_mount(
     if let Some(view) = app.get_webview(STORE) {
         view.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
         view.set_size(LogicalSize::new(width.max(1.0), height.max(1.0))).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        linux_overlay::place(&view, x, y, width, height);
         // Visibility is `store_visible`'s job: a resize while a dialog is up
         // must not bring the page back over it.
         return Ok(());
@@ -470,6 +474,8 @@ async fn store_mount(
     if visible == Some(false) {
         let _ = view.hide();
     }
+    #[cfg(target_os = "linux")]
+    linux_overlay::place(&view, x, y, width, height);
     #[cfg(windows)]
     allow_repeat_downloads(&view, settings::load(&app));
     Ok(())
@@ -516,6 +522,27 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
         let _ = view.set_focus();
     }
     Ok(())
+}
+
+/// Linux defaults that make the client behave, set before GTK starts. Each is
+/// left alone when the environment already sets it, so anyone can opt out.
+///
+/// * `GDK_BACKEND=x11` on a Wayland session (through XWayland). The menus are
+///   a small window of their own placed under the button that opened them,
+///   and Wayland does not let a window choose where it goes: they opened in
+///   the middle of the screen, or behind the client, and closed on the first
+///   focus change.
+/// * `WEBKIT_DISABLE_DMABUF_RENDERER=1`: WebKitGTK's DMA-BUF renderer draws
+///   blank, torn or offset pages on many drivers (NVIDIA in particular).
+#[cfg(target_os = "linux")]
+fn linux_env() {
+    let unset = |key: &str| std::env::var_os(key).is_none_or(|v| v.is_empty());
+    if unset("GDK_BACKEND") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    if unset("WEBKIT_DISABLE_DMABUF_RENDERER") {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
 }
 
 /// A mouse back/forward button pressed in the Store: the shell steps its one
@@ -750,6 +777,8 @@ fn control_catalog(app: tauri::AppHandle, action: String) -> Result<(), String> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    linux_env();
     let instance = system::claim_instance();
     if matches!(instance, system::Instance::AlreadyRunning) {
         // The copy already running has been asked to come to the front.

@@ -35,3 +35,6 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphic
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"

@@ -9,7 +9,12 @@ export type Account = {
   appearance?: AccountAppearance | null
   /** A kryo.to supporter, or someone who bought "no ads": never asked to donate. */
   supporter?: boolean
+  /** Using the client without an account (see App). */
+  guest?: boolean
 }
+
+/** Stands in for an account while using the client as a guest. */
+export const GUEST: Account = { username: '', displayName: 'Guest', avatarUrl: null, appearance: null, guest: true }
 
 /**
  * Who is signed in to kryo.to - read from the Store web view, which holds the

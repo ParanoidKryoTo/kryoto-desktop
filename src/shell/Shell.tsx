@@ -108,6 +108,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const saved = useSaved()
   const { state: page, actions: web } = browser
   const { toasts, push, dismiss } = useToasts()
+  const guest = !!account.guest
 
   /* ── History: the Library and the Store share the arrows ── */
   const [history, setHistory] = useState<{ stack: View[]; index: number }>({
@@ -188,7 +189,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   // Menus open in their own window over the Store; only dialogs hide it.
   const storeVisible =
     (view.kind === 'web' || (view.kind === 'settings' && isWebSection(view.section))) && !overlay && !page.error
-  const openSettings = useCallback((section: SettingsSection = 'general') => go({ kind: 'settings', section }), [go])
+  // A guest has no kryo.to settings to show; the client's own are all there is.
+  const openSettings = useCallback(
+    (section: SettingsSection = 'general') => go({ kind: 'settings', section: guest && isWebSection(section) ? 'general' : section }),
+    [go, guest],
+  )
+  const signIn = useCallback(() => openWeb('/login?next=/'), [openWeb])
   // Leaving Settings: the account may have changed its look or name there.
   const wasSettings = useRef(false)
   useEffect(() => {
@@ -234,7 +240,8 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const gamesRef = useRef(lib.games)
   gamesRef.current = lib.games
   const shareRef = useRef(true)
-  shareRef.current = settings?.sharePlaytime ?? true
+  // Play time and "playing now" belong to an account; a guest has none.
+  shareRef.current = !guest && (settings?.sharePlaytime ?? true)
   useEffect(() => {
     let stop: (() => void) | undefined
     let cancelled = false
@@ -373,14 +380,16 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings() },
         { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
         { separator: true },
-        { label: `Sign out ${account.username}`, icon: <LogOut />, onSelect: () => void signOut().catch(() => {}) },
+        guest
+          ? { label: 'Sign in to kryo.to', icon: <User />, onSelect: signIn }
+          : { label: `Sign out ${account.username}`, icon: <LogOut />, onSelect: () => void signOut().catch(() => {}) },
         { label: 'Exit Kryoto', onSelect: () => void exitApp() },
       ],
     },
     {
       label: 'View',
       items: [
-        { label: 'Store', onSelect: () => openWeb('/') },
+        { label: 'Store', onSelect: () => openStore() },
         { label: 'Library', onSelect: () => go({ kind: 'home' }) },
         { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
         { label: 'Community', onSelect: () => openWeb('/blog') },
@@ -416,11 +425,17 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   ]
 
   const username = account.username
+  // Back to the Store from the Library (or anywhere else in the client)
+  // resumes the page it was on, as it was left. Only a press while already
+  // looking at the Store, or with the view on another section's page (a
+  // profile, the blog), goes to its home.
+  const openStore = () =>
+    openWeb(view.kind !== 'web' && tabForUrl(page.url, settings?.catalogEndpoint) === 'store' ? undefined : '/')
   const tabs: NavTabSpec[] = [
     {
       id: 'store',
       label: 'Store',
-      onOpen: () => openWeb(view.kind === 'web' && tabForUrl(page.url, settings?.catalogEndpoint) === 'store' ? undefined : '/'),
+      onOpen: openStore,
       items: [
         { label: 'Home', onSelect: () => openWeb('/') },
         { label: 'Browse', onSelect: () => openWeb('/browse') },
@@ -453,18 +468,20 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         { label: 'YouTube', icon: <ArrowUpRight />, onSelect: () => void openExternal(YOUTUBE_URL) },
       ],
     },
-    {
-      id: 'profile',
-      label: account.displayName || account.username,
-      onOpen: () => openWeb(`/user/${username}`),
-      items: [
-        { label: 'Profile', onSelect: () => openWeb(`/user/${username}`) },
-        { label: 'Saved games', onSelect: () => openWeb('/library') },
-        { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
-        { label: 'Notifications', onSelect: () => openWeb('/notifications') },
-        { label: 'Settings', onSelect: () => openSettings('profile') },
-      ],
-    },
+    guest
+      ? { id: 'profile', label: 'Sign in', onOpen: signIn, items: [] }
+      : {
+          id: 'profile',
+          label: account.displayName || account.username,
+          onOpen: () => openWeb(`/user/${username}`),
+          items: [
+            { label: 'Profile', onSelect: () => openWeb(`/user/${username}`) },
+            { label: 'Saved games', onSelect: () => openWeb('/library') },
+            { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
+            { label: 'Notifications', onSelect: () => openWeb('/notifications') },
+            { label: 'Settings', onSelect: () => openSettings('profile') },
+          ],
+        },
   ]
   const currentTab: TopTab =
     view.kind === 'web'
@@ -475,12 +492,17 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           ? 'community'
           : 'library'
 
-  const accountMenu: MenuEntry[] = [
-    { label: 'View profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },
-    { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings('profile') },
-    { separator: true },
-    { label: 'Sign out', icon: <LogOut />, onSelect: () => void signOut().catch(() => {}) },
-  ]
+  const accountMenu: MenuEntry[] = guest
+    ? [
+        { label: 'Sign in to kryo.to', icon: <User />, onSelect: signIn },
+        { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings() },
+      ]
+    : [
+        { label: 'View profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },
+        { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings('profile') },
+        { separator: true },
+        { label: 'Sign out', icon: <LogOut />, onSelect: () => void signOut().catch(() => {}) },
+      ]
 
   /* ── Store helpers ── */
   const pageSlug = view.kind === 'web' ? slugOnPage(page.url, settings?.catalogEndpoint) : null
@@ -540,13 +562,14 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           account={account}
           page={page}
           onSignOut={() => void signOut().catch(() => {})}
+          onSignIn={signIn}
         />
       </div>
     )
   } else if (view.kind === 'friends') {
     content = (
       <div className="absolute inset-0 flex bg-background">
-        <FriendsPage account={account} onProfile={() => openWeb(`/user/${username}`)} onDiscord={() => void openExternal(DISCORD_URL)} />
+        <FriendsPage account={account} onProfile={guest ? signIn : () => openWeb(`/user/${username}`)} onDiscord={() => void openExternal(DISCORD_URL)} />
       </div>
     )
   } else if (view.kind === 'downloads') {
@@ -640,12 +663,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         right={
           view.kind === 'web' ? (
             <UrlPill page={page} actions={web} onLibrary={addFromPage} inLibrary={!!pageGame} />
-          ) : (
-            <Button variant="outline" size="sm" onClick={() => setOverlay({ kind: 'add', slug: null })}>
-              <Plus className="size-3" />
-              Add a game
-            </Button>
-          )
+          ) : null
         }
       />
       <main className="relative min-h-0 grow">
