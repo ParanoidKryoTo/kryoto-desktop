@@ -795,6 +795,11 @@ pub fn run() {
                 system::on_main_window_event(window, event);
             }
         })
+        // Updates: checked against latest.json on the newest GitHub release,
+        // signed with the key in tauri.conf.json. Only the shell's own view may
+        // call them (capabilities/updater.json), never a Store page.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(
             PluginBuilder::<tauri::Wry, ()>::new("catalog-policy")
                 .on_navigation(|webview, url| {
@@ -958,7 +963,9 @@ mod tests {
     fn no_plugin_touches_the_store_pages() {
         let toml = include_str!("../Cargo.toml");
         let plugins: Vec<&str> = toml.lines().filter(|l| l.trim_start().starts_with("tauri-plugin-")).collect();
-        let checked: [&str; 0] = []; // none yet
+        // Neither injects a script into pages; both are reachable only from the
+        // shell's own view (capabilities/updater.json).
+        let checked = ["tauri-plugin-updater", "tauri-plugin-process"];
         let unchecked: Vec<&&str> = plugins.iter().filter(|l| !checked.iter().any(|c| l.trim_start().starts_with(c))).collect();
         assert!(unchecked.is_empty(), "check these add no page script, then list them here: {unchecked:?}");
     }

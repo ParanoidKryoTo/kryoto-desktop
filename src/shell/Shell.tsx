@@ -22,6 +22,7 @@ import { TitleBar } from '@/shell/TitleBar'
 import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
 import { UrlPill, WebSlot } from '@/shell/WebView'
 import { BottomBar } from '@/shell/BottomBar'
+import { UpdateCheck, UpdatePrompt } from '@/shell/UpdatePrompt'
 import { Toasts, useToasts, type Toast } from '@/shell/Toasts'
 import { Sidebar } from '@/library/Sidebar'
 import { LibraryHome } from '@/library/LibraryHome'
@@ -730,6 +731,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           }}
         />
       ) : null}
+      <UpdatePrompt
+        busy={{
+          games: lib.running.size,
+          downloads: dl.filter((d) => d.status === 'downloading' || d.status === 'queued').length,
+        }}
+      />
       {overlay?.kind === 'about' ? (
         <Modal title="About" onClose={() => setOverlay(null)}>
           <div className="grid justify-items-center gap-5 py-4 text-center">
@@ -747,6 +754,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
                 <ArrowUpRight className="size-3" />
               </Button>
             </div>
+            <UpdateCheck />
             <p className="max-w-xs text-[11px] leading-relaxed text-muted-foreground">
               Kryoto Desktop is open source. Read the code, report a bug or send a fix on GitHub, and star it if you like it.
             </p>

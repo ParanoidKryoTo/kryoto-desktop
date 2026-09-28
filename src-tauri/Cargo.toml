@@ -24,6 +24,8 @@ futures-util = "0.3"
 sevenz-rust = "0.6"
 sha2 = "0.10"
 notify-rust = "4"
+tauri-plugin-updater = "2.13"
+tauri-plugin-process = "2.4"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"

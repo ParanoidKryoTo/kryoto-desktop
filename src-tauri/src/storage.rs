@@ -35,6 +35,10 @@ fn disk_space_of(path: &Path) -> Option<(u64, u64)> {
 }
 
 #[cfg(unix)]
+// The `statvfs` fields are u64 on 64-bit Linux but narrower elsewhere
+// (`fsblkcnt_t` is 32 bits on macOS and on 32-bit Linux), so the casts are
+// needed on some targets and redundant on this one - where clippy flags them.
+#[allow(clippy::unnecessary_cast)]
 fn disk_space_of(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;

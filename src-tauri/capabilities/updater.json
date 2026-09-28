@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "Checking for, downloading and installing a new version, then restarting into it. The shell's own view only: the Store's pages (the `catalog` webview) are remote sites and must never reach the updater.",
+  "windows": ["main"],
+  "webviews": ["main"],
+  "permissions": ["updater:default", "process:allow-restart"]
+}
