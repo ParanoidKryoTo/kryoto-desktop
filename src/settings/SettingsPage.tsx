@@ -54,13 +54,16 @@ export function SettingsPage({
   account,
   page,
   onSignOut,
+  onSignIn,
 }: {
   section: SettingsSection
   onSection: (s: SettingsSection) => void
   account: Account
   page: BrowserPageState
   onSignOut: () => void
+  onSignIn: () => void
 }) {
+  const guest = !!account.guest
   const kryo: RailItem[] = [
     { id: 'profile', label: 'Profile', icon: <User /> },
     { id: 'appearance', label: 'Appearance', icon: <Palette /> },
@@ -89,19 +92,25 @@ export function SettingsPage({
           )}
           <span className="grid min-w-0">
             <b className="truncate text-xs text-foreground">{name}</b>
-            <span className="truncate text-[10px] text-muted-foreground">@{account.username}</span>
+            <span className="truncate text-[10px] text-muted-foreground">{guest ? 'No account' : `@${account.username}`}</span>
           </span>
         </div>
-        <Rail title="kryo.to account" items={kryo} current={section} onSection={onSection} />
+        {guest ? null : <Rail title="kryo.to account" items={kryo} current={section} onSection={onSection} />}
         <Rail title="Kryoto Desktop" items={desktop} current={section} onSection={onSection} />
         <div className="mt-auto px-1">
-          <Button variant="ghost" size="sm" className="w-full justify-start" onClick={onSignOut}>
-            <LogOut className="size-3" />
-            Sign out
-          </Button>
+          {guest ? (
+            <Button variant="primary" size="sm" className="w-full" onClick={onSignIn}>
+              Sign in to kryo.to
+            </Button>
+          ) : (
+            <Button variant="ghost" size="sm" className="w-full justify-start" onClick={onSignOut}>
+              <LogOut className="size-3" />
+              Sign out
+            </Button>
+          )}
         </div>
       </nav>
-      {WEB[section] ? <WebPane fragment={WEB[section]!} page={page} /> : <DesktopPane section={section} />}
+      {WEB[section] && !guest ? <WebPane fragment={WEB[section]!} page={page} /> : <DesktopPane section={section} />}
     </div>
   )
 }

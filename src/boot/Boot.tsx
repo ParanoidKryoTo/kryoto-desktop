@@ -14,8 +14,8 @@ import { cn } from '@/lib/utils'
 /**
  * Before the client: the splash box, then the welcome screen with sign-in.
  *
- * A kryo.to account is required - the client is kryo.to - so nothing past
- * here opens without one. Sign-in is kryo.to's own page, shown inside the
+ * The splash has nothing to press: it moves on by itself (see App). The
+ * welcome screen offers a kryo.to account or a guest visit. Sign-in is kryo.to's own page, shown inside the
  * welcome screen in the same web view the Store uses: every way the site
  * signs in (a phone scan, Discord, email) works, and the session it makes is
  * the one the Store then has.
@@ -51,25 +51,13 @@ function Box({ children, className }: { children: ReactNode; className?: string 
 
 /* ── Splash ─────────────────────────────────────────────── */
 
-export function Splash({ ready, onStart }: { ready: boolean; onStart: () => void }) {
-  const [revealed, setRevealed] = useState(false)
-  const canStart = ready && revealed
-  const start = useRef<HTMLButtonElement | null>(null)
-  useEffect(() => {
-    if (canStart) start.current?.focus()
-  }, [canStart])
+export function Splash({ onRevealed }: { onRevealed: () => void }) {
   return (
     <Box className="grid grid-rows-[1fr_auto]">
       <div className="grid place-content-center justify-items-center gap-9 pt-6">
-        <KryoMark mode="reveal-shimmer" className="h-16" onRevealed={() => setRevealed(true)} />
+        <KryoMark mode="reveal-shimmer" className="h-16" onRevealed={onRevealed} />
         <div className="grid h-12 place-items-center">
-          {canStart ? (
-            <Button ref={start} variant="primary" size="lg" className="no-drag kryo-in min-w-40" onClick={onStart}>
-              Start
-            </Button>
-          ) : (
-            <AsciiBar fraction={null} cells={16} showPct={false} className="text-muted-foreground" />
-          )}
+          <AsciiBar fraction={null} cells={16} showPct={false} className="text-muted-foreground" />
         </div>
       </div>
       <p className="pointer-events-none pb-5 text-center text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
@@ -85,11 +73,13 @@ export function Welcome({
   account,
   page,
   onContinue,
+  onGuest,
   onRetry,
 }: {
   account: Account | null | undefined
   page: BrowserPageState
   onContinue: () => void
+  onGuest: () => void
   onRetry: () => void
 }) {
   const [signingIn, setSigningIn] = useState(false)
@@ -152,10 +142,13 @@ export function Welcome({
                   {page.error ? 'kryo.to is not answering' : 'Checking your account'}
                 </p>
                 {page.error ? (
-                  <Button size="sm" onClick={onRetry}>
-                    <RotateCw className="size-3" />
-                    Try again
-                  </Button>
+                  <>
+                    <Button size="sm" onClick={onRetry}>
+                      <RotateCw className="size-3" />
+                      Try again
+                    </Button>
+                    <GuestButton onGuest={onGuest} />
+                  </>
                 ) : null}
               </>
             ) : account ? (
@@ -180,6 +173,7 @@ export function Welcome({
                 <Button variant="primary" size="lg" className="w-full" onClick={() => setSigningIn(true)}>
                   Sign in with kryo.to
                 </Button>
+                <GuestButton onGuest={onGuest} />
               </>
             )}
           </div>
@@ -189,6 +183,20 @@ export function Welcome({
         {__APP_VERSION__}
       </p>
     </Box>
+  )
+}
+
+/** Into the client without an account. */
+function GuestButton({ onGuest }: { onGuest: () => void }) {
+  return (
+    <>
+      <Button variant="ghost" size="sm" onClick={onGuest}>
+        Continue as guest
+      </Button>
+      <p className="max-w-64 text-center text-[10px] leading-relaxed text-muted-foreground">
+        Your library works without an account. Sign in any time from the top bar.
+      </p>
+    </>
   )
 }
 
