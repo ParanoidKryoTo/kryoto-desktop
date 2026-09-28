@@ -119,7 +119,7 @@ const stored = (id: string, bytes: number) => {
 }
 
 const LOG = [
-  '2026-09-25 14:03:07Z INFO  app: Kryoto Desktop 0.2.1 started on windows',
+  '2026-09-25 14:03:07Z INFO  app: Kryoto Desktop 0.2.2 started on windows',
   '2026-09-25 14:03:09Z INFO  storage: added library folder D:\\Games\\Kryoto',
   '2026-09-25 14:05:41Z ERROR download: dl-1: The connection kept dropping (timed out). Resume to try again.',
   '2026-09-25 14:07:12Z INFO  library: uninstalling Terraria from C:\\Users\\you\\Kryoto Games\\Terraria',

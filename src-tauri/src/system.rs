@@ -5,7 +5,7 @@
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -395,6 +395,7 @@ pub async fn popup_open(app: AppHandle, x: f64, y: f64, right: bool, payload: se
     let state = app.state::<Popup>();
     *state.payload.lock().map_err(|_| "popup lock")? = Some(payload.clone());
     *state.anchor.lock().map_err(|_| "popup lock")? = (sx, sy, right);
+    POPUP_GEN.fetch_add(1, Ordering::SeqCst);
 
     if let Some(w) = app.get_window(POPUP_WINDOW) {
         let _ = w.hide();
@@ -425,10 +426,44 @@ pub async fn popup_open(app: AppHandle, x: f64, y: f64, right: bool, payload: se
     let app2 = app.clone();
     w.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {
-            hide_popup(&app2);
+            hide_if_left(&app2);
         }
     });
     Ok(())
+}
+
+/// Bumped on every open, so a late focus check never hides the next menu.
+static POPUP_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// "Focus left the pop-up" also fires when focus only moves from the window
+/// into its own web view (popup_ready does exactly that), which closed every
+/// menu the instant it opened. Look again a moment later and hide only if
+/// the pop-up really is no longer the window in front.
+fn hide_if_left<R: Runtime>(app: &AppHandle<R>) {
+    let gen = POPUP_GEN.load(Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        if POPUP_GEN.load(Ordering::SeqCst) != gen || popup_in_front(&app) {
+            return;
+        }
+        hide_popup(&app);
+    });
+}
+
+#[cfg(windows)]
+fn popup_in_front<R: Runtime>(app: &AppHandle<R>) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let Some(w) = app.get_window(POPUP_WINDOW) else { return false };
+    let Ok(hwnd) = w.hwnd() else { return false };
+    // SAFETY: no arguments; returns a handle or null.
+    let front = unsafe { GetForegroundWindow() };
+    front as isize == hwnd.0 as isize
+}
+
+#[cfg(not(windows))]
+fn popup_in_front<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.get_window(POPUP_WINDOW).and_then(|w| w.is_focused().ok()).unwrap_or(false)
 }
 
 #[tauri::command]

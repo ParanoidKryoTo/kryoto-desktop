@@ -1,6 +1,6 @@
 [package]
 name = "kryoto-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "Kryoto's native desktop launcher shell."
 authors = ["Kryoto"]
 license = "MIT"
@@ -31,7 +31,7 @@ tauri-plugin-process = "2.4"
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
 windows = { version = "0.62", default-features = false }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
