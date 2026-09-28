@@ -249,16 +249,10 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
         }
         // Only a real move or resize: Linux window managers send the same
         // geometry again on focus and stacking changes.
-        WindowEvent::Moved(p) => {
-            if changed(&LAST_POS, (p.x, p.y)) {
-                crate::menus::close(app);
-            }
-        }
-        WindowEvent::Resized(s) => {
-            if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) {
-                crate::menus::close(app);
-                report_window_state(window);
-            }
+        WindowEvent::Moved(p) if changed(&LAST_POS, (p.x, p.y)) => crate::menus::close(app),
+        WindowEvent::Resized(s) if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) => {
+            crate::menus::close(app);
+            report_window_state(window);
         }
         _ => {}
     }
