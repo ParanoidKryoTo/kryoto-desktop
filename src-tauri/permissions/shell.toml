@@ -21,6 +21,7 @@ commands.allow = [
   "store_refresh_account",
   "store_set_status",
   "store_report_play",
+  "store_report_playing",
   "navigate_catalog",
   "browser_navigate",
   "catalog_url",

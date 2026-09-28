@@ -2,16 +2,30 @@
 
 # Kryoto Desktop
 
+<p align="center">
+  <a href="https://github.com/kyrotooooo/kryoto-desktop/stargazers"><img src="https://img.shields.io/github/stars/kyrotooooo/kryoto-desktop?style=flat-square&label=stars" alt="GitHub stars"></a>
+  <a href="https://github.com/kyrotooooo/kryoto-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/kyrotooooo/kryoto-desktop?style=flat-square&label=release" alt="Latest release"></a>
+  <a href="https://kryo.to/desktop"><img src="https://img.shields.io/badge/kryo.to-desktop-black?style=flat-square" alt="kryo.to/desktop"></a>
+</p>
+
 Kryoto Desktop is an app where you manage everything on Kryoto in one place: find a game, download it and play it. Runs on Windows and Linux.
+
+**It is open source.** Read exactly what runs on your PC, build it yourself, report a bug or send a fix. If you like it, a star helps other people find it.
 
 ![Library](docs/screenshots/library.png)
 
 | | |
 |---|---|
-| ![Start](docs/screenshots/splash.png) | ![Sign in](docs/screenshots/welcome.png) |
 | ![Game](docs/screenshots/game.png) | ![Downloads](docs/screenshots/downloads.png) |
 | ![Storage](docs/screenshots/storage.png) | ![Community](docs/screenshots/community.png) |
 | ![Download settings](docs/screenshots/settings.png) | |
+
+## Get it
+
+Download the newest version from [kryo.to/desktop](https://kryo.to/desktop) or
+[Releases](../../releases/latest): the Windows installer, or an AppImage or a
+.deb for Linux. Once installed it updates itself: it checks on launch, and
+Help > About has Check for updates.
 
 ## Run it
 
@@ -38,6 +52,7 @@ sharing its data, and never send error reports.
 | `src-tauri/src/library.rs` | `library.json`, play/stop, play time, uninstall |
 | `src-tauri/src/storage.rs` | library folders, drive space, moving games between drives |
 | `src-tauri/src/system.rs` | tray, single instance, start with Windows, the pop-up menu window |
+| `src/lib/updates.ts`, `src/shell/UpdatePrompt.tsx` | the in-app updater: the check on launch, the prompt, Check for updates in About |
 | `src-tauri/src/logging.rs` | the log file, crash capture, reports to kryo.to |
 | `src/boot` | the start box and sign-in |
 | `src/shell`, `src/library`, `src/downloads`, `src/settings`, `src/community`, `src/friends` | the app |
@@ -63,11 +78,38 @@ Bump the version in `package.json`, `src-tauri/Cargo.toml` and
 and push to main. `.github/workflows/release.yml` sees the new version, builds
 the Windows installer, the AppImage and the .deb with `pnpm app:build`, and
 publishes them as release `v<version>`. kryo.to/desktop offers the newest
-release by itself; its `GITHUB_FORGE_TOKEN` needs Contents: read on this
-repository.
+release by itself.
+
+The same release carries the updater's files: a `.sig` beside each installer
+and `latest.json`, which every installed copy reads from
+`releases/latest/download/latest.json`. They are signed with the repository
+secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`,
+a key of Kryoto Desktop's own whose public half is `plugins.updater.pubkey` in
+`tauri.conf.json`. The release refuses to build without them, because a
+release with no `latest.json` is one no installed copy ever hears about, and
+refuses a key that does not match that public half.
+
+Keep the private key and its password somewhere besides the repository
+secrets (GitHub never shows a secret again). Losing it means a new key pair,
+and copies installed with the old public key cannot update past that point:
+they need one manual reinstall.
+
+Keep `@tauri-apps/api` and `@tauri-apps/cli` on the same minor version as the
+`tauri` crate in `Cargo.lock`: `tauri build` stops on a mismatch.
 
 `KRYOTO_STAND_IN=<folder with "Captain Hardcore.exe"> cargo test -- --ignored`
 also starts a real process the way Play does, against a stand-in that writes
 its arguments to `launch-log.txt`.
 
 Changes are listed in kryo.to's changelog; this app has none of its own.
+
+## Star history
+
+<a href="https://star-history.com/#kyrotooooo/kryoto-desktop&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=kyrotooooo/kryoto-desktop&type=Date&theme=dark" />
+    <img alt="Star history of Kryoto Desktop" src="https://api.star-history.com/svg?repos=kyrotooooo/kryoto-desktop&type=Date" />
+  </picture>
+</a>
+
+kryo.to/desktop shows the same count and history.

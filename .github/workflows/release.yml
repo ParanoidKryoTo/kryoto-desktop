@@ -12,6 +12,14 @@ name: Release
 # The installers land on a GitHub release, which is where kryo.to/desktop's
 # download buttons get them (kryo.to's lib/desktop-release.ts): Windows
 # (NSIS setup), Linux (AppImage and .deb).
+#
+# The same release carries the in-app updater's files: a minisign signature
+# (.sig) beside each installer, and latest.json, which every installed copy
+# reads from releases/latest/download/latest.json (tauri.conf.json
+# `plugins.updater`). Signing uses the TAURI_SIGNING_PRIVATE_KEY secret (and
+# its _PASSWORD) - Kryoto Desktop's own key, whose public half is
+# `plugins.updater.pubkey` in tauri.conf.json. Without it there is no latest.json and no installed copy
+# ever sees a new version, so the build refuses to run.
 on:
   push:
     branches: [main]
@@ -127,6 +135,19 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
             librsvg2-dev patchelf libxdo-dev libssl-dev
 
+      # `bundle.createUpdaterArtifacts` is on, so a build without the key dies
+      # inside `tauri build` with the signing error buried in its log. Say so
+      # up front instead.
+      - name: Require the updater signing key
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Without it there is no latest.json, and every installed copy stays on its current version. Set it (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD) in the repository secrets: the key whose public half is plugins.updater.pubkey in tauri.conf.json."
+            exit 1
+          fi
+
       - run: pnpm install --frozen-lockfile
 
       # Fail the release rather than ship something that does not pass.
@@ -144,7 +165,21 @@ jobs:
           # The AppImage tooling is itself an AppImage; without FUSE on the
           # runner it has to unpack itself instead of mounting.
           APPIMAGE_EXTRACT_AND_RUN: '1'
-        run: pnpm app:build
+          # Signs every updater artifact (the .sig beside each installer).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        # `tauri build` only WARNS when the key does not match the public key
+        # in tauri.conf.json, and signs anyway: every installed copy would then
+        # refuse the update ("signed with a different key"), which is how
+        # Forge's updater stayed dead for seven releases. Fail here instead.
+        run: |
+          set -o pipefail
+          pnpm app:build 2>&1 | tee build.log
+          if grep -q "does not match the public key" build.log; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY does not match plugins.updater.pubkey in tauri.conf.json. Installed copies would refuse this update."
+            exit 1
+          fi
 
       - name: Attach them to the release
         shell: bash
@@ -157,17 +192,74 @@ jobs:
           # Plain names: GitHub turns the space in "Kryoto Desktop" into a dot,
           # and kryo.to picks the files by their endings. The version in the
           # glob keeps an older build left in the cache from being picked up.
+          # Each installer's signature goes up under the installer's new name
+          # plus .sig; the manifest job below pairs them by that name.
           if [ "${{ matrix.platform }}" = "windows" ]; then
             cp "$bundle"/nsis/*_"${v}"_x64-setup.exe "out/Kryoto-Desktop_${v}_x64-setup.exe"
+            cp "$bundle"/nsis/*_"${v}"_x64-setup.exe.sig "out/Kryoto-Desktop_${v}_x64-setup.exe.sig"
           else
             cp "$bundle"/appimage/*_"${v}"_amd64.AppImage "out/Kryoto-Desktop_${v}_amd64.AppImage"
+            cp "$bundle"/appimage/*_"${v}"_amd64.AppImage.sig "out/Kryoto-Desktop_${v}_amd64.AppImage.sig"
             cp "$bundle"/deb/*_"${v}"_amd64.deb "out/Kryoto-Desktop_${v}_amd64.deb"
+            # Newer bundlers sign the .deb as well; an installed .deb only
+            # updates itself when one is there.
+            for sig in "$bundle"/deb/*_"${v}"_amd64.deb.sig; do
+              [ -f "$sig" ] && cp "$sig" "out/Kryoto-Desktop_${v}_amd64.deb.sig"
+            done
           fi
           ls -la out
           gh release upload "v$v" out/* --clobber
 
-  publish:
+  # latest.json: what every installed copy reads to learn there is a new
+  # version. Written once both platforms are up, from the signatures on the
+  # release, so it can never name a file that is not there.
+  manifest:
     needs: [check, create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          v="${{ needs.check.outputs.version }}"
+          mkdir -p sigs && cd sigs
+          gh release download "v$v" --repo "$REPO" --pattern '*.sig'
+          ls -la
+          V="$v" REPO="$REPO" node -e '
+            const fs = require("fs");
+            const v = process.env.V, base = `https://github.com/${process.env.REPO}/releases/download/v${v}/`;
+            const entry = (file) => {
+              const sig = `${file}.sig`;
+              if (!fs.existsSync(sig)) return null;
+              return { signature: fs.readFileSync(sig, "utf8").trim(), url: base + file };
+            };
+            const win = entry(`Kryoto-Desktop_${v}_x64-setup.exe`);
+            const appimage = entry(`Kryoto-Desktop_${v}_amd64.AppImage`);
+            const deb = entry(`Kryoto-Desktop_${v}_amd64.deb`);
+            if (!win || !appimage) {
+              console.error("::error::A Windows or AppImage signature is missing from the release; not writing a latest.json that would strand one platform.");
+              process.exit(1);
+            }
+            // The updater looks for {os}-{arch}-{installer} first. The plain
+            // windows key is the fallback for older copies; there is none for
+            // Linux, so a .deb install never gets handed an AppImage.
+            const platforms = { "windows-x86_64-nsis": win, "windows-x86_64": win, "linux-x86_64-appimage": appimage };
+            if (deb) platforms["linux-x86_64-deb"] = deb;
+            const manifest = {
+              version: v,
+              notes: "What changed is in the kryo.to changelog: https://kryo.to/changelog",
+              pub_date: new Date().toISOString(),
+              platforms,
+            };
+            fs.writeFileSync("latest.json", JSON.stringify(manifest, null, 2));
+            console.log(JSON.stringify(manifest, null, 2));
+          '
+          gh release upload "v$v" latest.json --repo "$REPO" --clobber
+
+  publish:
+    needs: [check, create-release, build, manifest]
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release

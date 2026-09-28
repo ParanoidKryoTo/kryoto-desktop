@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
+  ArrowUpRight,
   FolderOpen,
   Globe,
   LogOut,
@@ -21,6 +22,7 @@ import { TitleBar } from '@/shell/TitleBar'
 import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
 import { UrlPill, WebSlot } from '@/shell/WebView'
 import { BottomBar } from '@/shell/BottomBar'
+import { UpdateCheck, UpdatePrompt } from '@/shell/UpdatePrompt'
 import { Toasts, useToasts, type Toast } from '@/shell/Toasts'
 import { Sidebar } from '@/library/Sidebar'
 import { LibraryHome } from '@/library/LibraryHome'
@@ -39,6 +41,7 @@ import { useDownloads } from '@/lib/downloads'
 import { useSettings } from '@/lib/settings'
 import { call, errorText, on } from '@/lib/bridge'
 import { logError } from '@/lib/log'
+import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
 import { entryIsVr, entryLabel, library, playTarget, type LibraryGame } from '@/lib/library'
 import { exitApp, isTauri, navigateCatalog, openExternal, setStoreVisible, signOut } from '@/lib/window'
 
@@ -79,7 +82,7 @@ function tabForUrl(url: string, catalogEndpoint?: string): TopTab {
     return 'store'
   }
   if (/^\/(user|settings|account|notifications|library|login|signup|register)(\/|$)/.test(path)) return 'profile'
-  if (/^\/(blog|collections|requests|stats|discord|rolls)(\/|$)/.test(path)) return 'community'
+  if (/^\/(blog|collections|requests|stats|community|rolls)(\/|$)/.test(path)) return 'community'
   return 'store'
 }
 
@@ -224,8 +227,9 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     }
   }, [go, openWeb, openSettings])
 
-  // A kryo.to game closing adds the session to the account's play time
-  // (Settings > Windows can turn that off).
+  // A kryo.to game closing adds the session to the account's play time, and
+  // one starting or closing tells kryo.to what is being played right now
+  // (Settings > Windows can turn both off).
   const settings = useSettings()
   const gamesRef = useRef(lib.games)
   gamesRef.current = lib.games
@@ -235,9 +239,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     let stop: (() => void) | undefined
     let cancelled = false
     void on<{ id: string; running: boolean; seconds: number | null }>('game-state', (e) => {
-      if (e.running || !e.seconds || e.seconds < 60 || !shareRef.current) return
+      if (!shareRef.current) return
       const slug = gamesRef.current.find((g) => g.id === e.id)?.slug
       if (!slug) return
+      // "Playing right now" on kryo.to: on as it starts, off as it closes.
+      void call('store_report_playing', { slug, playing: e.running }).catch((err) => logError('playing', err))
+      if (e.running || !e.seconds || e.seconds < 60) return
       const now = Math.floor(Date.now() / 1000)
       const key = `${e.id.slice(0, 40)}-${now}`.replace(/[^a-zA-Z0-9-]/g, '-')
       void call('store_report_play', { slug, startedAt: now - e.seconds, seconds: Math.min(e.seconds, 86_400), key }).catch((err) =>
@@ -248,6 +255,22 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       cancelled = true
       stop?.()
     }
+  }, [])
+
+  // While a game runs, say so again every few minutes: kryo.to forgets a
+  // game it has not heard about for ten, so a crash or a lost connection
+  // never leaves somebody "playing" forever.
+  const runningRef = useRef(lib.running)
+  runningRef.current = lib.running
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      if (!shareRef.current) return
+      for (const id of runningRef.current) {
+        const slug = gamesRef.current.find((g) => g.id === id)?.slug
+        if (slug) void call('store_report_playing', { slug, playing: true }).catch((err) => logError('playing', err))
+      }
+    }, 4 * 60_000)
+    return () => window.clearInterval(t)
   }, [])
 
   // What the library reports as an error goes in the log too.
@@ -382,7 +405,10 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       items: [
         { label: 'Kryoto support', onSelect: () => openWeb('/support') },
         { label: "What's new on kryo.to", onSelect: () => openWeb('/changelog') },
-        { label: 'Discord', onSelect: () => openWeb('/discord') },
+        { separator: true },
+        { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
+        { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
+        { label: 'YouTube', icon: <ArrowUpRight />, onSelect: () => void openExternal(YOUTUBE_URL) },
         { separator: true },
         { label: 'About Kryoto Desktop', onSelect: () => setOverlay({ kind: 'about' }) },
       ],
@@ -421,7 +447,10 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         { label: 'Blog', onSelect: () => openWeb('/blog') },
         { label: 'Collections', onSelect: () => openWeb('/collections') },
         { label: 'Requests', onSelect: () => openWeb('/requests') },
-        { label: 'Discord', onSelect: () => openWeb('/discord') },
+        { separator: true },
+        { label: 'Discord', icon: <ArrowUpRight />, onSelect: () => void openExternal(DISCORD_URL) },
+        { label: 'Reddit', icon: <ArrowUpRight />, onSelect: () => void openExternal(REDDIT_URL) },
+        { label: 'YouTube', icon: <ArrowUpRight />, onSelect: () => void openExternal(YOUTUBE_URL) },
       ],
     },
     {
@@ -517,7 +546,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   } else if (view.kind === 'friends') {
     content = (
       <div className="absolute inset-0 flex bg-background">
-        <FriendsPage account={account} onProfile={() => openWeb(`/user/${username}`)} onDiscord={() => openWeb('/discord')} />
+        <FriendsPage account={account} onProfile={() => openWeb(`/user/${username}`)} onDiscord={() => void openExternal(DISCORD_URL)} />
       </div>
     )
   } else if (view.kind === 'downloads') {
@@ -702,6 +731,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           }}
         />
       ) : null}
+      <UpdatePrompt
+        busy={{
+          games: lib.running.size,
+          downloads: dl.filter((d) => d.status === 'downloading' || d.status === 'queued').length,
+        }}
+      />
       {overlay?.kind === 'about' ? (
         <Modal title="About" onClose={() => setOverlay(null)}>
           <div className="grid justify-items-center gap-5 py-4 text-center">
@@ -714,7 +749,15 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
               <Button size="sm" onClick={() => { setOverlay(null); openWeb('/support') }}>
                 Support
               </Button>
+              <Button size="sm" onClick={() => void openExternal(SOURCE_URL)}>
+                Source
+                <ArrowUpRight className="size-3" />
+              </Button>
             </div>
+            <UpdateCheck />
+            <p className="max-w-xs text-[11px] leading-relaxed text-muted-foreground">
+              Kryoto Desktop is open source. Read the code, report a bug or send a fix on GitHub, and star it if you like it.
+            </p>
           </div>
         </Modal>
       ) : null}

@@ -34,6 +34,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis",
       "deb",
@@ -61,5 +62,16 @@
     "copyright": "Kryoto",
     "shortDescription": "The kryo.to desktop client",
     "longDescription": "Kryoto Desktop: the kryo.to store, your game library, downloads that install themselves, and every way a game starts."
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/kyrotooooo/kryoto-desktop/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDNDNEOUZFQUE4MUVDMDAKUldRQTdJR3EvdGxEUEcyclFXTzFldDRhQ2FON1gvQ0dMRXEvVDdkclNuVkZ6S2VqM01LTWJMdkgK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
