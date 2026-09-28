@@ -640,12 +640,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         right={
           view.kind === 'web' ? (
             <UrlPill page={page} actions={web} onLibrary={addFromPage} inLibrary={!!pageGame} />
-          ) : (
-            <Button variant="outline" size="sm" onClick={() => setOverlay({ kind: 'add', slug: null })}>
-              <Plus className="size-3" />
-              Add a game
-            </Button>
-          )
+          ) : null
         }
       />
       <main className="relative min-h-0 grow">

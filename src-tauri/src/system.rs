@@ -246,10 +246,32 @@ pub fn on_main_window_event<R: Runtime>(window: &tauri::Window<R>, event: &Windo
                 app.exit(0);
             }
         }
-        WindowEvent::Moved(_) | WindowEvent::Resized(_) => hide_popup(window.app_handle()),
+        // Only a real move or resize: Linux window managers send the same
+        // geometry again on focus and stacking changes (the pop-up showing is
+        // one), which closed every menu the moment it opened.
+        WindowEvent::Moved(p) => {
+            if changed(&LAST_POS, (p.x, p.y)) {
+                hide_popup(window.app_handle());
+            }
+        }
+        WindowEvent::Resized(s) => {
+            if changed(&LAST_SIZE, (s.width as i32, s.height as i32)) {
+                hide_popup(window.app_handle());
+            }
+        }
         WindowEvent::Focused(false) => {}
         _ => {}
     }
+}
+
+static LAST_POS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+static LAST_SIZE: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+
+/// Record `now` and say whether it differs from what was recorded before.
+fn changed(last: &Mutex<Option<(i32, i32)>>, now: (i32, i32)) -> bool {
+    let Ok(mut last) = last.lock() else { return true };
+    let was = last.replace(now);
+    was != Some(now)
 }
 
 /* ── Window corners ───────────────────────────────────────── */

@@ -2059,6 +2059,7 @@ name = "kryoto-desktop"
 version = "0.2.2"
 dependencies = [
  "futures-util",
+ "gtk",
  "libc",
  "notify-rust",
  "reqwest 0.12.28",
