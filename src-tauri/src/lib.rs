@@ -301,6 +301,23 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   const side = (e) => { if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); return true } return false };
   addEventListener('mousedown', side, true);
   addEventListener('mouseup', (e) => { if (side(e)) invoke('store_nav_button', { forward: e.button === 4 }) }, true);
+  // A plain link that leaves kryo.to (Discord, Reddit, YouTube, a filehost's
+  // page) opens in the system browser: window.open goes through the Store's
+  // new-window handler, which sends anything not kryo.to out of the app.
+  // Bubble phase, so a link the page handles itself (defaultPrevented) is left
+  // alone; top frame only, since this script is, so ads and captchas in
+  // iframes keep working. `target=_blank` already takes that path by itself.
+  addEventListener('click', (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a || a.hasAttribute('download') || (a.target && a.target !== '_self')) return;
+    let url;
+    try { url = new URL(a.href, location.href); } catch (_) { return; }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return;
+    if (url.origin === location.origin || /(^|\.)kryo\.to$/.test(url.hostname)) return;
+    e.preventDefault();
+    window.open(url.href, '_blank', 'noopener');
+  });
   addEventListener('offline', () => report({ error: 'offline' }));
   report();
   who();
@@ -669,6 +686,25 @@ fn store_set_status(
 /// A game closed: add the session to the account's play time on kryo.to
 /// (community statistics, the play-time board). Sent from the Store's page
 /// with the player's own session. `key` makes a retried report count once.
+/// A game started (`playing`), is still running, or closed: kryo.to shows how
+/// many people are playing what right now (never who). Sent on start, every
+/// few minutes while it runs, and on close, from the Store's page with the
+/// player's own session; a beat that stops arriving ages out on the site.
+#[tauri::command]
+fn store_report_playing(app: tauri::AppHandle, slug: String, playing: bool) -> Result<(), String> {
+    if slug.is_empty() || slug.len() > 120 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Not a kryo.to game.".into());
+    }
+    let view = store(&app)?;
+    if !view.url().map(|u| is_kryoto(&u, &app)).unwrap_or(false) {
+        return Err("Open kryo.to first.".into());
+    }
+    view.eval(format!(
+        "fetch('/api/desktop/playing',{{method:'POST',credentials:'include',headers:{{'content-type':'application/json'}},body:JSON.stringify({{slug:'{slug}',playing:{playing}}})}}).catch(()=>{{}})"
+    ))
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn store_report_play(app: tauri::AppHandle, slug: String, started_at: u64, seconds: u64, key: String) -> Result<(), String> {
     if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -836,6 +872,7 @@ pub fn run() {
             store_refresh_account,
             store_set_status,
             store_report_play,
+            store_report_playing,
             navigate_catalog,
             browser_navigate,
             report_catalog_state,

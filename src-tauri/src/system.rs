@@ -457,7 +457,14 @@ pub fn popup_ready(app: AppHandle, width: f64, height: f64) -> Result<(), String
     w.set_size(LogicalSize::new(width.max(40.0), height.max(20.0))).map_err(|e| e.to_string())?;
     w.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
     w.show().map_err(|e| e.to_string())?;
+    // The window AND the page inside it: focusing only the window left the web
+    // view without keyboard focus, so the menu showed but did nothing - no
+    // highlight under the pointer (it is focus-driven), no Escape, and no blur
+    // to close it on a click elsewhere - until it was clicked once.
     let _ = w.set_focus();
+    if let Some(view) = app.get_webview(POPUP) {
+        let _ = view.set_focus();
+    }
     Ok(())
 }
 

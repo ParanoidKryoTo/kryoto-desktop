@@ -38,10 +38,19 @@ export function PopupApp() {
     void document.fonts.ready.then(() => {
       if (cancelled || !box.current) return
       const r = box.current.getBoundingClientRect()
-      void call('popup_ready', { width: Math.ceil(r.width) + POPUP_PAD * 2, height: Math.ceil(r.height) + POPUP_PAD * 2 })
       // The menu itself takes focus, not its first item: nothing is lit until
-      // the pointer or an arrow key picks something.
+      // the pointer or an arrow key picks something. Only once the window is
+      // shown and focused (popup_ready): focusing before that was lost, and
+      // the menu sat there unable to highlight, hear Escape or close.
+      const grab = () => {
+        if (cancelled || !box.current) return
+        window.focus()
+        box.current.focus({ preventScroll: true })
+      }
       box.current.focus({ preventScroll: true })
+      void call('popup_ready', { width: Math.ceil(r.width) + POPUP_PAD * 2, height: Math.ceil(r.height) + POPUP_PAD * 2 })
+        .then(grab)
+        .catch(() => {})
     })
     return () => {
       cancelled = true

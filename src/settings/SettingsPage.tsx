@@ -282,8 +282,8 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             <Check checked={s.closeToTray} onChange={(v) => set('closeToTray', v)} label="Closing the window keeps Kryoto running in the tray" />
             <Check checked={s.startWithSystem} onChange={(v) => set('startWithSystem', v)} label={`Start Kryoto when I sign in to ${isWindowsHost() ? 'Windows' : 'my computer'}`} />
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
-            <Section title="Play time" hint="Counts toward the community statistics. The play-time board only shows public profiles.">
-              <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Add my play time to my kryo.to account" />
+            <Section title="Play time" hint="Counts toward the community statistics, and toward what people are playing right now (a number per game, never who). The play-time board only shows public profiles.">
+              <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Share my play time and what I am playing with kryo.to" />
             </Section>
           </>
         ) : null}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Clock, Eye, MessageSquare, RotateCw, ShieldCheck, Users } from 'lucide-react'
+import { ArrowUpRight, Clock, Eye, MessageSquare, RotateCw, ShieldCheck, Users } from 'lucide-react'
 import { AsciiBar, Button, Caption, IconButton, Label } from '@/ui'
 import { isTauri } from '@/lib/bridge'
 import { adultBlur, useShowAdult } from '@/lib/adult'
@@ -7,6 +7,8 @@ import type { LibraryGame } from '@/lib/library'
 import { formatPlaytime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { catalogApiUrl } from '@/lib/endpoint'
+import { openExternal } from '@/lib/window'
+import { DISCORD_URL, REDDIT_URL, YOUTUBE_URL } from '@/lib/community'
 
 /**
  * Community: what everyone on kryo.to is playing, looking at and talking
@@ -29,6 +31,8 @@ type Stats = {
     mostPlayed: (Card & { hours: number; players: number })[]
     board: { username: string; displayName: string | null; avatarUrl: string | null; hours: number; topGame: string | null }[]
   }
+  /** Being played right now. Absent from a kryo.to that predates it. */
+  live?: { players: number; games: (Card & { players: number })[] }
   popular: (Card & { views: number; downloads: number })[]
   talk: {
     commentsToday: number
@@ -60,6 +64,14 @@ const PREVIEW: Stats = {
       { username: 'mira', displayName: 'Mira', avatarUrl: null, hours: 41.2, topGame: 'Hades II' },
       { username: 'k0bold', displayName: null, avatarUrl: null, hours: 37.9, topGame: 'Terraria' },
       { username: 'nox', displayName: 'Nox', avatarUrl: null, hours: 30.3, topGame: 'Celeste' },
+    ],
+  },
+  live: {
+    players: 7,
+    games: [
+      { slug: 'goat-simulator', title: 'Goat Simulator', cover: steam(265930), nsfw: false, players: 2 },
+      { slug: 'hades-ii', title: 'Hades II', cover: steam(1145350), nsfw: false, players: 2 },
+      { slug: 'terraria', title: 'Terraria', cover: steam(105600), nsfw: false, players: 1 },
     ],
   },
   popular: [
@@ -148,6 +160,20 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
           <div className="grid gap-2">
             <Label>Community</Label>
             <h1 className="text-3xl font-bold tracking-tight text-foreground">This week on kryo.to</h1>
+            <p className="text-xs text-muted-foreground">{liveSentence(stats)}</p>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {SOCIAL.map((l) => (
+                <button
+                  key={l.href}
+                  type="button"
+                  onClick={() => void openExternal(l.href)}
+                  className="kryo-pill flex items-center gap-1.5 border border-border bg-card/60 px-3 py-1 text-[11px] text-muted-foreground backdrop-blur-md transition-colors hover:border-foreground/40 hover:text-foreground"
+                >
+                  {l.label}
+                  <ArrowUpRight className="size-3" aria-hidden />
+                </button>
+              ))}
+            </div>
           </div>
           <div className="flex items-center gap-3">
             <Caption>updated {ago(stats.generatedAt)}</Caption>
@@ -157,12 +183,21 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
           </div>
         </header>
 
+        {stats.live?.games.length ? (
+          <Shelf title={`Playing right now · ${stats.live.players} in a game`}>
+            {stats.live.games.map((g) => (
+              <Poster key={g.slug} game={g} blur={adultBlur(g.nsfw, showAdult)} onClick={() => onGame(g.slug)} line={`${g.players} playing now`} />
+            ))}
+          </Shelf>
+        ) : null}
+
         <dl className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           <Tile icon={<Clock />} label="Hours played" value={num(p.hoursWeek)} note={`${num(p.hoursAllTime)} all time`} big />
           <Tile icon={<Users />} label="Players" value={num(p.playersWeek)} note={`${num(p.sessionsWeek)} sessions`} />
           <Tile icon={<MessageSquare />} label="Comments today" value={num(stats.talk.commentsToday)} note={`${num(stats.talk.commentsTotal)} in all`} />
           <Tile icon={<Clock />} label="Longest session" value={`${num(p.longestSessionHours)}h`} note="in one sitting" />
-          <div className="kryo-radius grid content-between gap-2 border border-border bg-card p-4">
+          {/* The fifth tile: the full width under the other four when they pair up two by two. */}
+          <div className="kryo-radius col-span-2 grid content-between gap-2 border border-border bg-card p-4 lg:col-span-1">
             <dt className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
               <ShieldCheck className="size-3.5" />
               Verified working
@@ -173,7 +208,11 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
                 <span className="text-xs font-normal text-muted-foreground"> / {num(stats.testing.live)}</span>
               </span>
               <AsciiBar fraction={stats.testing.live ? stats.testing.verified / stats.testing.live : 0} cells={14} showPct={false} className="text-[11px]" />
-              <span className="text-[10px] text-muted-foreground">by {stats.testing.testers} testers</span>
+              {stats.testing.testers > 0 ? (
+              <span className="text-[10px] text-muted-foreground">
+                by {stats.testing.testers} tester{stats.testing.testers === 1 ? '' : 's'}
+              </span>
+            ) : null}
             </dd>
           </div>
         </dl>
@@ -297,6 +336,27 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
   )
 }
 
+const SOCIAL = [
+  { label: 'Join our Discord', href: DISCORD_URL },
+  { label: 'Join our subreddit', href: REDDIT_URL },
+  { label: 'Follow us on YouTube', href: YOUTUBE_URL },
+]
+
+/** Under the title: who is in a game right now, or the week when nobody is. */
+function liveSentence(stats: Stats): string {
+  const people = (n: number) => `${num(n)} ${n === 1 ? 'person' : 'people'}`
+  const top = stats.live?.games.find((g) => !g.nsfw)
+  if (!stats.live || stats.live.players === 0 || !top) {
+    return stats.play.playersWeek > 0
+      ? `${people(stats.play.playersWeek)} played ${num(stats.play.hoursWeek)} hours this week.`
+      : 'What everyone is playing, looking at and talking about.'
+  }
+  const lead = top.players === 1 ? `Someone is playing ${top.title}` : `${people(top.players)} are playing ${top.title}`
+  const rest = stats.live.players - top.players
+  if (rest <= 0) return `${lead} right now.`
+  return rest === 1 ? `${lead} right now, and 1 more person is in another game.` : `${lead} right now, and ${num(rest)} more people are in other games.`
+}
+
 function Tile({ icon, label, value, note, big = false }: { icon: React.ReactNode; label: string; value: string; note?: string; big?: boolean }) {
   return (
     <div className={cn('kryo-radius grid content-between gap-2 border border-border p-4', big ? 'bg-primary text-primary-foreground' : 'bg-card')}>
@@ -312,11 +372,12 @@ function Tile({ icon, label, value, note, big = false }: { icon: React.ReactNode
   )
 }
 
+/** Two, four or eight across: the API sends up to eight, so a full shelf ends on a full row. */
 function Shelf({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="grid gap-3">
       <Label>{title}</Label>
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-4">{children}</div>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">{children}</div>
     </section>
   )
 }

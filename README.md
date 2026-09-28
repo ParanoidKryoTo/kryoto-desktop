@@ -2,7 +2,15 @@
 
 # Kryoto Desktop
 
+<p align="center">
+  <a href="https://github.com/kyrotooooo/kryoto-desktop/stargazers"><img src="https://img.shields.io/github/stars/kyrotooooo/kryoto-desktop?style=flat-square&label=stars" alt="GitHub stars"></a>
+  <a href="https://github.com/kyrotooooo/kryoto-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/kyrotooooo/kryoto-desktop?style=flat-square&label=release" alt="Latest release"></a>
+  <a href="https://kryo.to/desktop"><img src="https://img.shields.io/badge/kryo.to-desktop-black?style=flat-square" alt="kryo.to/desktop"></a>
+</p>
+
 Kryoto Desktop is an app where you manage everything on Kryoto in one place: find a game, download it and play it. Runs on Windows and Linux.
+
+**It is open source.** Read exactly what runs on your PC, build it yourself, report a bug or send a fix. If you like it, a star helps other people find it.
 
 ![Library](docs/screenshots/library.png)
 
@@ -71,3 +79,14 @@ also starts a real process the way Play does, against a stand-in that writes
 its arguments to `launch-log.txt`.
 
 Changes are listed in kryo.to's changelog; this app has none of its own.
+
+## Star history
+
+<a href="https://star-history.com/#kyrotooooo/kryoto-desktop&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=kyrotooooo/kryoto-desktop&type=Date&theme=dark" />
+    <img alt="Star history of Kryoto Desktop" src="https://api.star-history.com/svg?repos=kyrotooooo/kryoto-desktop&type=Date" />
+  </picture>
+</a>
+
+kryo.to/desktop shows the same count and history, read from GitHub's API (`lib/desktop-repo.ts` in kryo.to).
