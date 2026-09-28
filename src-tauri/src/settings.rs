@@ -51,6 +51,12 @@ pub struct Settings {
     pub speed_limit_mb: u32,
     /// Optional local or staging Kryo.to origin for development.
     pub catalog_endpoint: String,
+    /// Linux: MangoHud's overlay on every Windows game (when it is installed).
+    pub linux_mangohud: bool,
+    /// Linux: run Windows games under Feral GameMode (when it is installed).
+    pub linux_gamemode: bool,
+    /// Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions.
+    pub linux_fsr: bool,
 }
 
 impl Default for Settings {
@@ -76,6 +82,9 @@ impl Default for Settings {
             connections: 8,
             speed_limit_mb: 0,
             catalog_endpoint: String::new(),
+            linux_mangohud: false,
+            linux_gamemode: false,
+            linux_fsr: false,
         }
     }
 }

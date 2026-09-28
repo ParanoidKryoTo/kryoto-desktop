@@ -1,4 +1,4 @@
-// Build the installer without the build machine in it.
+// Build the installer without the build machine in it. OPSEC!!
 //
 //   pnpm app:build            (extra arguments go to `tauri build`)
 //

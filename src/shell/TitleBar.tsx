@@ -3,6 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Bell, ChevronDown, Expand, Megaphone, Shrink } from 'lucide-react'
 import { MenuButton, MenuList, type MenuEntry } from '@/ui'
 import { KryoMark } from '@/ui/ascii/KryoMark'
+import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri } from '@/lib/window'
 import { openInbox } from '@/lib/popup'
 import { cn } from '@/lib/utils'
@@ -68,7 +69,7 @@ export function TitleBar({
 
   return (
     <header className="relative z-50 flex h-9 shrink-0 select-none items-stretch border-b border-border bg-background">
-      <div className="drag flex items-center pl-3.5 pr-2" onDoubleClick={() => void act('max')}>
+      <div data-maximize className="drag flex items-center pl-3.5 pr-2">
         <KryoMark className="pointer-events-none h-3.5" />
       </div>
       <nav aria-label="Menus" className="no-drag flex items-center">
@@ -82,7 +83,9 @@ export function TitleBar({
           />
         ))}
       </nav>
-      <div className="drag grow" onDoubleClick={() => void act('max')} />
+      <div data-maximize className="drag flex grow items-center justify-center">
+        <DevEndpointNotice />
+      </div>
 
       <div className="no-drag flex items-center gap-1.5 pr-2">
         {news?.version ? (

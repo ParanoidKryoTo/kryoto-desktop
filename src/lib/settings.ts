@@ -34,6 +34,12 @@ export type Settings = {
   speedLimitMb: number
   /** Blank uses production; set a local site origin while developing. */
   catalogEndpoint: string
+  /** Linux: MangoHud's overlay on Windows games. */
+  linuxMangohud: boolean
+  /** Linux: run Windows games under GameMode. */
+  linuxGamemode: boolean
+  /** Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions. */
+  linuxFsr: boolean
 }
 
 /** kryo.to's palettes, named as the site names them. */

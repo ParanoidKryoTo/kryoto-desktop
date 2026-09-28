@@ -296,13 +296,30 @@ fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<us
     let prefix = data_dir(app)?.join("prefixes").join(&game.id);
     // The game's own pick, else the one in Settings, else the best one found
     // on this computer (newest Proton, then umu-run, then Wine).
+    let settings = crate::settings::load(app);
+    let managed = crate::compat::managed_dir(app);
     let own = game.compat_tool.clone().filter(|t| !t.trim().is_empty());
-    let fallback = crate::settings::load(app).default_compat_tool.filter(|t| !t.trim().is_empty());
+    let fallback = settings.default_compat_tool.clone().filter(|t| !t.trim().is_empty());
     let detected = if cfg!(windows) || own.is_some() || fallback.is_some() {
         None
     } else {
-        crate::compat::detect().into_iter().next().map(|t| t.path)
+        crate::compat::detect_in(managed.as_deref()).into_iter().next().map(|t| t.path)
     };
+    let umu = crate::compat::umu_run(managed.as_deref());
+    // Settings > Compatibility's switches, only when the tool is really there.
+    let mut wrappers = Vec::new();
+    let mut env = Vec::new();
+    if !cfg!(windows) {
+        if settings.linux_gamemode {
+            wrappers.extend(crate::compat::on_path("gamemoderun").map(|p| p.to_string_lossy().into_owned()));
+        }
+        if settings.linux_mangohud {
+            wrappers.extend(crate::compat::on_path("mangohud").map(|p| p.to_string_lossy().into_owned()));
+        }
+        if settings.linux_fsr {
+            env.push(("WINE_FULLSCREEN_FSR".to_string(), "1".to_string()));
+        }
+    }
     let tool = own.or(fallback).or(detected);
     let tool = tool.as_deref().map(Path::new);
     launch::plan(&launch::PlanInput {
@@ -316,6 +333,9 @@ fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<us
         source: game.source.as_deref(),
         apply_overrides: game.apply_overrides,
         windows_host: cfg!(windows),
+        umu: umu.as_deref(),
+        wrappers,
+        env,
     })
 }
 

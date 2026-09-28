@@ -228,6 +228,13 @@ pub struct PlanInput<'a> {
     pub source: Option<&'a str>,
     pub apply_overrides: bool,
     pub windows_host: bool,
+    /// Linux: umu-run, when there is one. A Proton then runs through it, inside
+    /// the Steam Linux Runtime, the way Steam runs it.
+    pub umu: Option<&'a Path>,
+    /// Linux: wrappers from Settings (gamemoderun, mangohud), before the line's own.
+    pub wrappers: Vec<String>,
+    /// Linux: environment from Settings; the launch options line still wins.
+    pub env: Vec<(String, String)>,
 }
 
 pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
@@ -258,13 +265,33 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
     if !input.windows_host {
         // Wrappers (gamemoderun, mangohud) are a Linux idea; Windows has no
         // use for them and would fail trying to start one.
+        let base = |w: &str| Path::new(w).file_name().map(|n| n.to_os_string());
+        for w in &input.wrappers {
+            if !line.wrappers.iter().any(|l| base(l) == base(w)) {
+                chain.push(w.clone());
+            }
+        }
         chain.extend(line.wrappers.iter().cloned());
-        let tool = input
-            .compat_tool
-            .ok_or("This is a Windows game. Pick Wine or Proton under Properties, Compatibility.")?;
+        for (k, v) in &input.env {
+            set_default(&mut env, k, v);
+        }
+        let tool = input.compat_tool.ok_or(
+            "This is a Windows game. Get Proton in Settings, Compatibility, or pick Wine or Proton under Properties, Compatibility.",
+        )?;
         let kind = crate::compat::kind_of(tool);
-        chain.push(tool.to_string_lossy().into_owned());
-        if kind == "umu" {
+        let through_umu = kind == "proton" && input.umu.is_some();
+        if through_umu {
+            chain.push(input.umu.unwrap_or(tool).to_string_lossy().into_owned());
+        } else {
+            chain.push(tool.to_string_lossy().into_owned());
+        }
+        if through_umu {
+            // Steam's way: the Proton picked, run by umu inside the runtime.
+            let proton_dir = tool.parent().unwrap_or(tool);
+            set_default(&mut env, "PROTONPATH", &proton_dir.to_string_lossy());
+            set_default(&mut env, "WINEPREFIX", &input.prefix_dir.to_string_lossy());
+            set_default(&mut env, "GAMEID", "0");
+        } else if kind == "umu" {
             // umu-run is Proton outside Steam: a prefix and a game id is all it needs.
             set_default(&mut env, "WINEPREFIX", &input.prefix_dir.to_string_lossy());
             set_default(&mut env, "GAMEID", "0");
@@ -348,6 +375,9 @@ mod tests {
             source: Some("Steam + Kryoto Online"),
             apply_overrides: true,
             windows_host: windows,
+            umu: None,
+            wrappers: Vec::new(),
+            env: Vec::new(),
         }
     }
 
@@ -411,6 +441,24 @@ mod tests {
     }
 
     #[test]
+    fn a_proton_runs_through_umu_with_the_settings_wrappers() {
+        let mut i = input(None, "gamemoderun %command%", false);
+        i.compat_tool = Some(Path::new("/data/compat/GE-Proton10-3/proton"));
+        i.umu = Some(Path::new("/data/compat/umu/umu-run"));
+        i.wrappers = vec!["/usr/bin/gamemoderun".into(), "/usr/bin/mangohud".into()];
+        i.env = vec![("WINE_FULLSCREEN_FSR".into(), "1".into())];
+        let p = plan(&i).unwrap();
+        // gamemoderun only once: the line already has it.
+        assert_eq!(p.program, PathBuf::from("/usr/bin/mangohud"));
+        assert_eq!(p.lead_args[0], "gamemoderun");
+        assert_eq!(p.lead_args[1], "/data/compat/umu/umu-run");
+        let env: std::collections::HashMap<_, _> = p.env.iter().cloned().collect();
+        assert_eq!(env["PROTONPATH"], "/data/compat/GE-Proton10-3");
+        assert_eq!(env["WINE_FULLSCREEN_FSR"], "1");
+        assert!(!env.contains_key("STEAM_COMPAT_DATA_PATH"));
+    }
+
+    #[test]
     fn linux_without_a_tool_says_what_to_do() {
         let mut i = input(None, "", false);
         i.compat_tool = None;
@@ -460,6 +508,9 @@ mod tests {
                 source: Some("Steam (DRM-free)"),
                 apply_overrides: true,
                 windows_host: cfg!(windows),
+                umu: None,
+                wrappers: Vec::new(),
+                env: Vec::new(),
             })
             .unwrap();
             let mut child = command(&p).spawn().unwrap();

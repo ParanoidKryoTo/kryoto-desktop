@@ -112,4 +112,7 @@ Changes are listed in kryo.to's changelog; this app has none of its own.
   </picture>
 </a>
 
-kryo.to/desktop shows the same count and history.
+
+## License
+
+[MIT](LICENSE). Use it, change it and share it; keep the license notice with it.

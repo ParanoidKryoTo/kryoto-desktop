@@ -6,7 +6,11 @@
   "remote": {
     "urls": [
       "https://**",
-      "http://**"
+      "http://**",
+      "https://*:*/*",
+      "http://localhost:*/*",
+      "http://127.0.0.1:*/*",
+      "http://*.localhost:*/*"
     ]
   },
   "permissions": ["allow-report-catalog-state"]

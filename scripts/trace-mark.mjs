@@ -1,5 +1,5 @@
 // Trace kryo.to's K// mark into vector rectangles, so the client draws the
-// site's real mark - not a lookalike - crisp at any size.
+// site's real mark - crisp at any size.
 //
 //   node scripts/trace-mark.mjs [path/to/kryo-mark-ascii.png]
 //

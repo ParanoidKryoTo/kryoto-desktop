@@ -187,9 +187,9 @@
 .kryo-toast { animation: kryo-toast 260ms var(--kryo-ease-out) both; }
 .kryo-blink { animation: kryo-blink 1s steps(1) infinite; }
 
-/* The window drags from these; everything clickable inside opts out. */
-.drag { -webkit-app-region: drag; }
-.no-drag { -webkit-app-region: no-drag; }
+/* `.drag` areas move the window and `.no-drag` opts back out: done by
+   lib/window-drag.ts, not -webkit-app-region, which cost every button inside
+   its hand cursor in WebView2. */
 
 /* Game art over the page: a fade into the background, in whatever palette. */
 .hero-fade {

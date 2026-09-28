@@ -9,7 +9,7 @@ import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
 import { StoragePane } from '@/settings/StoragePane'
-import { CompatPicker } from '@/settings/CompatPicker'
+import { CompatPane } from '@/settings/CompatPane'
 import { LogsPane } from '@/settings/LogsPane'
 
 /**
@@ -287,11 +287,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             </Section>
           </>
         ) : null}
-        {section === 'compat' ? (
-          <Section title="Run Windows games with" hint="Games can pick their own under Properties, Compatibility.">
-            <CompatPicker value={s.defaultCompatTool} onChange={(v) => set('defaultCompatTool', v)} />
-          </Section>
-        ) : null}
+        {section === 'compat' ? <CompatPane s={s} set={set} /> : null}
         {section === 'developer' ? (
           <Section title="Kryo.to endpoint" hint="Blank uses production. For local testing, use http://localhost:3000.">
             <div className="grid gap-3">

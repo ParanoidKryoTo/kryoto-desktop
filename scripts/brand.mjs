@@ -1,4 +1,4 @@
-// Render Kryoto Desktop's brand files from code.
+// Render Kryoto Desktop's brand files from code. # yes i used AI to generate this, im not doing this manually.. - Myth.k//
 //
 //   pnpm brand
 //

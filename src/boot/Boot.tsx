@@ -5,6 +5,7 @@ import { AsciiBar, Button } from '@/ui'
 import { AsciiArt } from '@/ui/ascii/AsciiArt'
 import { WORDMARK } from '@/ui/ascii/cells'
 import { KryoMark } from '@/ui/ascii/KryoMark'
+import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { isTauri, exitApp, mountStore, navigateCatalog, setStoreVisible, signOut, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
@@ -40,11 +41,9 @@ function BoxControls() {
 /** The box is the whole window; Windows rounds it and draws its shadow. */
 function Box({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <main
-      data-tauri-drag-region
-      className={cn('drag kryo-square relative h-full overflow-hidden bg-background text-foreground', className)}
-    >
+    <main className={cn('drag kryo-square relative h-full overflow-hidden bg-background text-foreground', className)}>
       <BoxControls />
+      <DevEndpointNotice className="absolute left-1/2 top-3 z-20 -translate-x-1/2" />
       {children}
     </main>
   )

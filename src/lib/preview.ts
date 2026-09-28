@@ -106,6 +106,10 @@ const settings: Record<string, unknown> = {
   sharePlaytime: true,
   connections: 8,
   speedLimitMb: 0,
+  catalogEndpoint: '',
+  linuxMangohud: false,
+  linuxGamemode: false,
+  linuxFsr: false,
 }
 
 const GB = 1_073_741_824
@@ -184,6 +188,17 @@ setInterval(() => {
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T
 
 const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
+  compat_status: () => ({
+    tools: [
+      { name: 'GE-Proton10-17', path: '/home/you/.local/share/to.kryo.desktop/compat/GE-Proton10-17/proton', kind: 'proton', managed: true },
+      { name: 'Proton 9.0 (Beta)', path: '/home/you/.steam/steam/steamapps/common/Proton 9.0 (Beta)/proton', kind: 'proton', managed: false },
+      { name: 'umu-run', path: '/home/you/.local/share/to.kryo.desktop/compat/umu/umu-run', kind: 'umu', managed: true },
+      { name: 'wine', path: '/usr/bin/wine', kind: 'wine', managed: false },
+    ],
+    umu: '/home/you/.local/share/to.kryo.desktop/compat/umu/umu-run',
+    mangohud: true,
+    gamemode: false,
+  }),
   library_list: () => clone(games),
   game_running: () => [...running],
   library_save: (a) => {
