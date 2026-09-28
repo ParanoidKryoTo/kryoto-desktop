@@ -43,6 +43,9 @@ struct Account {
     /// adult blur), which the client follows unless Settings says not to.
     #[serde(default)]
     appearance: Option<serde_json::Value>,
+    /// A supporter (or bought "no ads"): the client does not ask them to donate.
+    #[serde(default)]
+    supporter: bool,
 }
 
 /// State reported by the page-side script.
@@ -88,6 +91,57 @@ fn some_account<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<
 struct BrowserErrorEvent {
     url: String,
     reason: String,
+}
+
+/// The game kryo.to said it was about to download (`store_expect_download`),
+/// kept until the download arrives. A navigation that turns into a download
+/// can reach `on_download` without its `#fragment` (WebView2 hands over the
+/// address without it), and a board's `?game=` may be gone by then too, so
+/// this is the context that survives. Used once, and only while fresh.
+#[derive(Default)]
+struct PendingDownload(std::sync::Mutex<Option<ExpectedDownload>>);
+
+struct ExpectedDownload {
+    slug: String,
+    title: Option<String>,
+    at: std::time::Instant,
+}
+
+/// How long a page's word about its next download holds.
+const EXPECT_FOR: std::time::Duration = std::time::Duration::from_secs(90);
+
+fn take_expected<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<ExpectedDownload> {
+    let state = app.try_state::<PendingDownload>()?;
+    let mut pending = state.0.lock().ok()?;
+    pending.take().filter(|e| e.at.elapsed() < EXPECT_FOR)
+}
+
+/// A download's game and title, from everything that can say: the address's
+/// fragment, what the page announced, then the page the Store is on.
+fn download_game<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    url: &url::Url,
+    page: Option<url::Url>,
+    settings: &settings::Settings,
+) -> (Option<String>, Option<String>) {
+    let page_slug = page.and_then(|u| game_slug(&u, settings));
+    merge_download_context(download_context(url), take_expected(app), page_slug)
+}
+
+fn merge_download_context(
+    (mut slug, mut title): (Option<String>, Option<String>),
+    expected: Option<ExpectedDownload>,
+    page_slug: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if let Some(expected) = expected {
+        // A fragment naming another game wins; a stale announcement never
+        // renames a download it was not about.
+        if slug.is_none() || slug.as_deref() == Some(expected.slug.as_str()) {
+            title = title.or(expected.title);
+            slug = slug.or(Some(expected.slug));
+        }
+    }
+    (slug.or(page_slug), title)
 }
 
 /// Only plain web navigation stays inside the web view. Everything else
@@ -207,6 +261,7 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           username: u.username,
           displayName: u.displayName || null,
           avatarUrl: u.avatarUrl || null,
+          supporter: !!(u.isSupporter || (Array.isArray(u.perks) && u.perks.indexOf('ad_free') >= 0)),
           appearance: {
             palette: u.appearancePalette || null,
             radius: u.appearanceRadius || null,
@@ -228,6 +283,19 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       .catch(() => {});
   };
   window.__kryoDesktopRefresh = who;
+  // kryo.to names a download right before it starts it (the site's
+  // game-downloads.tsx): the download can reach the app without the
+  // address's #fragment, so this is the context that holds.
+  try {
+    Object.defineProperty(window, 'kryotoDesktop', {
+      value: Object.freeze({
+        expectDownload: (slug, title) => invoke('store_expect_download', {
+          slug: String(slug || ''),
+          title: title ? String(title) : null
+        })
+      })
+    });
+  } catch (_) {}
   // The mouse's back and forward buttons: the app's history, not the page's,
   // so they step through the Store and back into the Library like the arrows.
   const side = (e) => { if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); return true } return false };
@@ -310,6 +378,7 @@ fn download_context(url: &url::Url) -> (Option<String>, Option<String>) {
 /// kryo.to's files are taken over by the Downloads manager, and pop-ups open
 /// in the same view (kryo.to) or the system browser (anywhere else).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn store_mount(
     app: tauri::AppHandle,
     url: String,
@@ -349,8 +418,7 @@ async fn store_mount(
                 if !downloads::is_ours(&url, &settings) {
                     return true;
                 }
-                let (slug, title) = download_context(&url);
-                let slug = slug.or_else(|| webview.url().ok().and_then(|u| game_slug(&u, &settings)));
+                let (slug, title) = download_game(webview.app_handle(), &url, webview.url().ok(), &settings);
                 let mut clean_url = url;
                 clean_url.set_fragment(None);
                 downloads::enqueue(webview.app_handle(), clean_url.to_string(), slug, title);
@@ -438,6 +506,36 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
 #[tauri::command]
 fn store_nav_button(app: tauri::AppHandle, forward: bool) {
     let _ = app.emit_to("main", "nav-button", forward);
+}
+
+/// kryo.to is about to start a download: which game it is. Sent by the page
+/// (`window.kryotoDesktop.expectDownload`, from BROWSER_STATE_SCRIPT) right
+/// before it navigates to the file. Only a kryo.to page in the Store may say.
+#[tauri::command]
+fn store_expect_download(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    slug: String,
+    title: Option<String>,
+) -> Result<(), String> {
+    if webview.label() != STORE {
+        return Err("Only the Store names its downloads.".into());
+    }
+    let page = webview.url().map_err(|e| e.to_string())?;
+    if !is_kryoto(&page, &app) {
+        return Err("Only kryo.to names its downloads.".into());
+    }
+    let slug = slug.trim().to_ascii_lowercase();
+    if slug.is_empty() || slug.len() > 160 || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Not a kryo.to game.".into());
+    }
+    let title = title
+        .map(|t| t.trim().chars().filter(|c| !c.is_control()).take(300).collect::<String>())
+        .filter(|t| !t.is_empty());
+    let state = app.state::<PendingDownload>();
+    let mut pending = state.0.lock().map_err(|_| "busy".to_string())?;
+    *pending = Some(ExpectedDownload { slug, title, at: std::time::Instant::now() });
+    Ok(())
 }
 
 /// Kryoto path shortcut (menus, tabs). Path-only, same origin.
@@ -635,6 +733,7 @@ pub fn run() {
         .manage(downloads::Downloads::new())
         .manage(storage::Moving::default())
         .manage(system::Popup::default())
+        .manage(PendingDownload::default())
         .setup(move |app| {
             logging::init(app.handle());
             logging::start_reporter(app.handle().clone());
@@ -741,6 +840,7 @@ pub fn run() {
             browser_navigate,
             report_catalog_state,
             store_nav_button,
+            store_expect_download,
             catalog_url,
             control_catalog,
             open_external,
@@ -855,6 +955,30 @@ mod tests {
         );
         url.set_fragment(None);
         assert_eq!(url.as_str(), "https://dl.kryo.to/d/signed");
+    }
+
+    /// The canvas modal's download used to arrive as "Download": WebView2
+    /// hands the download over without the address's fragment. What the page
+    /// announced fills in, and never overrides a fragment about another game.
+    #[test]
+    fn a_download_is_named_by_what_the_page_announced() {
+        let expected = |slug: &str| ExpectedDownload {
+            slug: slug.into(),
+            title: Some("Hades II".into()),
+            at: std::time::Instant::now(),
+        };
+        assert_eq!(
+            merge_download_context((None, None), Some(expected("hades-ii")), None),
+            (Some("hades-ii".into()), Some("Hades II".into()))
+        );
+        assert_eq!(
+            merge_download_context((Some("celeste".into()), None), Some(expected("hades-ii")), None),
+            (Some("celeste".into()), None)
+        );
+        assert_eq!(
+            merge_download_context((None, None), None, Some("celeste".into())),
+            (Some("celeste".into()), None)
+        );
     }
 
     #[test]

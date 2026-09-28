@@ -58,7 +58,12 @@ export function AddonsCard({
   const applied = game.addons ?? []
   const appliedFiles = new Set(applied.map((a) => a.file.toLowerCase()))
   const isApplied = (a: KryoAddon) => a.links.some((l) => l.name && appliedFiles.has(l.name.toLowerCase()))
-  const kryoOnline = (available ?? []).find(isOnline)
+  // The Online add-on only where Kryoto Online is offered at all: Steam lists
+  // online play and the release has no way online of its own. kryo.to says
+  // so too (`offered`); either one saying no hides it.
+  const wanted = (a: KryoAddon) => !isOnline(a) || (onlineOffered && a.offered !== false)
+  const offers = (available ?? []).filter((a) => !isApplied(a) && wanted(a))
+  const kryoOnline = offers.find(isOnline)
   const showOnline = !!game.online || onlineOffered
 
   const run = async (key: string, job: () => Promise<LibraryGame>) => {
@@ -74,31 +79,29 @@ export function AddonsCard({
   }
 
   if (available === null) return null
-  const nothing = available.length === 0 && applied.length === 0 && !showOnline
+  const nothing = offers.length === 0 && applied.length === 0 && !showOnline
   if (nothing) return null
 
   return (
     <Card className="grid gap-4">
       <Label>Add-ons</Label>
 
-      {available
-        .filter((a) => !isApplied(a))
-        .map((a) => (
-          <Row
-            key={a.id}
-            title={a.label || 'Add-on'}
-            sub={[a.note, a.download_size].filter(Boolean).join(' · ')}
-            action={
-              // kryo.to's download window, where it is under Optional extras:
-              // the download has to pass the site's check there. Once it
-              // lands it goes into this game by itself.
-              <Button size="sm" onClick={onGet}>
-                <Download className="size-3" />
-                Apply add-on
-              </Button>
-            }
-          />
-        ))}
+      {offers.map((a) => (
+        <Row
+          key={a.id}
+          title={a.label || 'Add-on'}
+          sub={[a.note, a.download_size].filter(Boolean).join(' · ')}
+          action={
+            // kryo.to's download window, where it is under Optional extras:
+            // the download has to pass the site's check there. Once it
+            // lands it goes into this game by itself.
+            <Button size="sm" onClick={onGet}>
+              <Download className="size-3" />
+              Apply add-on
+            </Button>
+          }
+        />
+      ))}
 
       {applied.map((a) => (
         <Row

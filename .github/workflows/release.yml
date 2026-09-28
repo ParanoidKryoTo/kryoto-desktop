@@ -1,0 +1,183 @@
+name: Release
+
+# Fires on a VERSION BUMP, not on every push.
+#
+# The first job reads `version` out of src-tauri/tauri.conf.json and stops
+# unless that version has no tag yet. So the release ritual is: bump the
+# version in package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json
+# (the job refuses to go on when they differ), add the entry to kryo.to's
+# CHANGELOG.md (this app has none of its own), push. No tagging by hand, and
+# no accidental release from an unrelated commit.
+#
+# The installers land on a GitHub release, which is where kryo.to/desktop's
+# download buttons get them (kryo.to's lib/desktop-release.ts): Windows
+# (NSIS setup), Linux (AppImage and .deb).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src-tauri/tauri.conf.json'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+# One release at a time; a second bump waits rather than racing the first.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      needed: ${{ steps.v.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        shell: bash
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(sed -n 's/^version *= *"\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
+          if [ "$version" != "$pkg" ] || [ "$version" != "$cargo" ]; then
+            echo "::error::Versions differ: tauri.conf.json $version, package.json $pkg, Cargo.toml $cargo. Bump all three."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "v$version is already tagged; nothing to release."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  create-release:
+    needs: check
+    if: needs.check.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - name: Create the draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ needs.check.outputs.version }}';
+            const tag = `v${version}`;
+            const { owner, repo } = context.repo;
+            // A draft left by a run that failed part-way has no tag yet, so the
+            // check above cannot see it. Clear it, or this release would be
+            // created beside it and the half-empty one could be published.
+            const drafts = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            for (const old of drafts.filter((r) => r.draft && r.tag_name === tag)) {
+              core.info(`Removing the leftover draft ${old.id} for ${tag}`);
+              await github.rest.repos.deleteRelease({ owner, repo, release_id: old.id });
+            }
+            const { data } = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: context.sha,
+              name: `Kryoto Desktop ${version}`,
+              body: `Kryoto Desktop ${version} for Windows and Linux.\n\nWhat changed is in the kryo.to changelog: https://kryo.to/changelog`,
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
+  build:
+    needs: [check, create-release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          # 22.04, not ubuntu-latest: the Tauri packages below keep these names
+          # there; 24.04 renamed the appindicator one. It is also the oldest
+          # glibc the AppImage and .deb should still run on.
+          - os: ubuntu-22.04
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      - run: pnpm install --frozen-lockfile
+
+      # Fail the release rather than ship something that does not pass.
+      - name: Check
+        shell: bash
+        run: |
+          pnpm build
+          cd src-tauri
+          cargo test --locked
+
+      # `app:build` is `tauri build` with the build machine's paths remapped out
+      # of the binary, and it fails if any are still in it (scripts/build.mjs).
+      - name: Build the installers
+        env:
+          # The AppImage tooling is itself an AppImage; without FUSE on the
+          # runner it has to unpack itself instead of mounting.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: pnpm app:build
+
+      - name: Attach them to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v="${{ needs.check.outputs.version }}"
+          bundle=src-tauri/target/release/bundle
+          mkdir -p out
+          # Plain names: GitHub turns the space in "Kryoto Desktop" into a dot,
+          # and kryo.to picks the files by their endings. The version in the
+          # glob keeps an older build left in the cache from being picked up.
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            cp "$bundle"/nsis/*_"${v}"_x64-setup.exe "out/Kryoto-Desktop_${v}_x64-setup.exe"
+          else
+            cp "$bundle"/appimage/*_"${v}"_amd64.AppImage "out/Kryoto-Desktop_${v}_amd64.AppImage"
+            cp "$bundle"/deb/*_"${v}"_amd64.deb "out/Kryoto-Desktop_${v}_amd64.deb"
+          fi
+          ls -la out
+          gh release upload "v$v" out/* --clobber
+
+  publish:
+    needs: [check, create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false,
+              make_latest: 'true',
+            });

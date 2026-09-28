@@ -471,6 +471,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             let _ = child.kill();
+            let _ = child.wait();
             let text = std::fs::read_to_string(&log).unwrap();
             let _ = std::fs::remove_file(&log);
             text

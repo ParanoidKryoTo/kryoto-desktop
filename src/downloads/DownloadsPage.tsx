@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Download, Pause, Play, RotateCw, X } from 'lucide-react'
+import { Download, HeartHandshake, Pause, Play, RotateCw, X } from 'lucide-react'
 import { AsciiBar, AsciiSpark, Button, Caption, IconButton, Label } from '@/ui'
 import { downloads as api, formatBytes, formatEta, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { Art } from '@/library/LibraryHome'
@@ -15,10 +15,13 @@ export function DownloadsPage({
   list,
   onOpenGame,
   onStore,
+  onDonate,
 }: {
   list: Dl[]
   onOpenGame: (id: string) => void
   onStore: () => void
+  /** kryo.to's donate page; absent for supporters, who are never asked. */
+  onDonate: (() => void) | null
 }) {
   const current = list.find(isWorking)
   const waiting = list.filter((d) => d !== current && (isActive(d) || d.status === 'paused' || d.status === 'failed'))
@@ -36,6 +39,7 @@ export function DownloadsPage({
 
   return (
     <div className="grid min-h-0 grow content-start gap-8 overflow-auto p-6">
+      {onDonate ? <Donate onDonate={onDonate} /> : null}
       {current ? <Current d={current} /> : null}
       {waiting.length ? (
         <section className="grid gap-3">
@@ -54,6 +58,26 @@ export function DownloadsPage({
         </section>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Every file comes from kryo.to's own filehost, and storage is what it costs:
+ * said where the downloads are, so it is seen by the people using it.
+ */
+function Donate({ onDonate }: { onDonate: () => void }) {
+  return (
+    <section className="kryo-radius flex items-center gap-4 border border-primary/60 bg-primary/10 p-4">
+      <HeartHandshake className="size-6 shrink-0 text-primary" aria-hidden />
+      <p className="grow text-xs leading-relaxed text-muted-foreground">
+        <b className="text-foreground">We host our files on our own filehost for the best download speeds.</b> Sadly, storage is VERY
+        expensive. Please consider donating.
+      </p>
+      <Button variant="primary" size="sm" onClick={onDonate}>
+        <HeartHandshake className="size-3.5" />
+        Donate
+      </Button>
+    </section>
   )
 }
 

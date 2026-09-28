@@ -179,11 +179,8 @@ export function Welcome({
             ) : (
               <>
                 <Button variant="primary" size="lg" className="w-full" onClick={() => setSigningIn(true)}>
-                  Sign in
+                  Sign in with kryo.to
                 </Button>
-                <p className="text-center text-[11px] leading-relaxed text-muted-foreground">
-                  Sign in with your kryo.to account.
-                </p>
               </>
             )}
           </div>

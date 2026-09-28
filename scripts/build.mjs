@@ -34,7 +34,12 @@ if (run.status !== 0) process.exit(run.status ?? 1)
 const exe = path.join(root, 'src-tauri', 'target', 'release', process.platform === 'win32' ? 'kryoto-desktop.exe' : 'kryoto-desktop')
 const bytes = readFileSync(exe).toString('latin1').toLowerCase()
 const name = os.userInfo().username.toLowerCase()
-const leaks = [home.toLowerCase(), `users\\${name}`, `users/${name}`, `home/${name}`].filter((s) => bytes.includes(s))
+// Each as the start of a path (followed by a separator), not as bare text: a
+// home of `/root` (a container building as root) is also the tail of Steam's
+// own `~/.steam/root`, which the app looks for on purpose.
+const leaks = [home.toLowerCase(), `users\\${name}`, `users/${name}`, `home/${name}`]
+  .flatMap((s) => [`${s}/`, `${s}\\`])
+  .filter((s) => bytes.includes(s))
 if (leaks.length) {
   console.error(`\nThe build still contains ${leaks.map((l) => JSON.stringify(l)).join(' and ')}. Do not ship it.`)
   process.exit(1)

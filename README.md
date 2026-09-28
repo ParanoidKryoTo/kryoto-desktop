@@ -49,7 +49,22 @@ sharing its data, and never send error reports.
 ```text
 pnpm build                   # typecheck + build the UI
 cd src-tauri && cargo test
+cd src-tauri && cargo clippy --all-targets -- -D warnings
 ```
+
+CI (`.github/workflows/ci.yml`) runs all of that on every push and pull
+request, on Ubuntu and on Windows, and checks that the three version fields
+agree.
+
+## Releases
+
+Bump the version in `package.json`, `src-tauri/Cargo.toml` and
+`src-tauri/tauri.conf.json` together, add the entry to kryo.to's changelog,
+and push to main. `.github/workflows/release.yml` sees the new version, builds
+the Windows installer, the AppImage and the .deb with `pnpm app:build`, and
+publishes them as release `v<version>`. kryo.to/desktop offers the newest
+release by itself; its `GITHUB_FORGE_TOKEN` needs Contents: read on this
+repository.
 
 `KRYOTO_STAND_IN=<folder with "Captain Hardcore.exe"> cargo test -- --ignored`
 also starts a real process the way Play does, against a stand-in that writes

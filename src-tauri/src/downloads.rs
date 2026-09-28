@@ -289,6 +289,62 @@ pub fn is_ours(url: &url::Url, settings: &crate::settings::Settings) -> bool {
     false
 }
 
+/// The placeholder a download is called until something better is known.
+const UNNAMED: &str = "Download";
+
+/// Whether `title` is only a stand-in: empty, the placeholder, or the slug.
+fn is_placeholder(title: &str, slug: Option<&str>) -> bool {
+    let t = title.trim();
+    t.is_empty() || t.eq_ignore_ascii_case(UNNAMED) || slug.is_some_and(|s| s.eq_ignore_ascii_case(t))
+}
+
+/// The name dl.kryo.to will save a link under, read from the link itself.
+///
+/// A `/d/<token>` link carries its file name in the token: the part before the
+/// dot is base64url JSON (`{"k":…,"exp":…,"n":"Hades II - Kryoto.7z"}`). It is
+/// signed, not secret, so it can be read for a label the moment the download
+/// is handed over, before a byte has arrived. Only ever used as a name.
+pub fn file_name_in_link(url: &str) -> Option<String> {
+    let url: url::Url = url.parse().ok()?;
+    let mut parts = url.path_segments()?;
+    if parts.next()? != "d" {
+        return None;
+    }
+    let body = parts.next()?.split('.').next()?;
+    let json: serde_json::Value = serde_json::from_slice(&base64url(body)?).ok()?;
+    json["n"].as_str().map(str::trim).filter(|n| !n.is_empty() && n.len() <= 255).map(String::from)
+}
+
+/// Decode unpadded base64url. `None` for anything that is not.
+fn base64url(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let text = text.trim_end_matches('=');
+    if text.len() > 8192 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes() {
+        acc = (acc << 6) | value(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// Queue a download the Store handed over. `slug` is the game page it came from.
 pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>, title: Option<String>) {
     let state = app.state::<Downloads>();
@@ -304,13 +360,16 @@ pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>
         }
     }
     let id = format!("dl-{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+    // The page's title first; then the name the link itself carries, so a
+    // download that arrives with nothing else is still called after its game
+    // from the first frame rather than "Download".
+    let named = title
+        .filter(|t| !is_placeholder(t, slug.as_deref()))
+        .or_else(|| file_name_in_link(&url).and_then(|n| title_in_file_name(&n)));
     let item = Download {
         id: id.clone(),
         meta: CatalogMeta {
-            title: title
-                .filter(|title| !title.trim().is_empty())
-                .or_else(|| slug.clone())
-                .unwrap_or_else(|| "Download".into()),
+            title: named.or_else(|| slug.clone()).unwrap_or_else(|| UNNAMED.into()),
             ..Default::default()
         },
         slug,
@@ -359,6 +418,30 @@ impl Notice {
     pub fn new(title: &str, body: &str, game_id: Option<String>) -> Self {
         Self { title: title.into(), body: body.into(), game_id }
     }
+}
+
+/// The kryo.to game whose title is exactly `name` (letters and digits
+/// compared, case aside), from the site's search. Only an exact match: a
+/// download filed under the wrong game would install as it.
+async fn find_slug(client: &reqwest::Client, endpoint: &str, name: &str) -> Option<String> {
+    let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let wanted = squash(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    let q: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+    let res = client.get(format!("{endpoint}/api/games/search?q={q}&limit=8")).send().await.ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = res.json().await.ok()?;
+    json["results"]
+        .as_array()?
+        .iter()
+        .find(|g| g["title"].as_str().is_some_and(|t| squash(t) == wanted))
+        .and_then(|g| g["slug"].as_str())
+        .filter(|s| !s.is_empty() && s.len() <= 160 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .map(str::to_ascii_lowercase)
 }
 
 async fn fetch_meta(client: &reqwest::Client, endpoint: &str, slug: &str) -> Option<CatalogMeta> {
@@ -423,17 +506,41 @@ pub fn filename_from_disposition(value: &str) -> Option<String> {
 /// catalog answer yet) reads "Download" in the list and its notices. Once the
 /// file's own name is known, that is a better name than none.
 fn name_from_file(d: &mut Download) {
-    let t = d.meta.title.trim();
-    if t.is_empty() || t == "Download" || d.slug.as_deref() == Some(t) {
-        d.meta.title = title_from_file(&d.file_name);
+    if is_placeholder(&d.meta.title, d.slug.as_deref()) {
+        if let Some(title) = title_in_file_name(&d.file_name) {
+            d.meta.title = title;
+        }
     }
 }
 
 pub fn title_from_file(name: &str) -> String {
-    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).trim();
+    title_in_file_name(name).unwrap_or_else(|| "Game".into())
+}
+
+/// The game's name in a release file's name, or `None` when the name says
+/// nothing: a server that sent no file name leaves the last piece of the
+/// address - `download`, `file`, a signed token - and none of those is a game.
+pub fn title_in_file_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    // Only a short, known archive extension is an extension: a token's dot
+    // splits it into two long runs, and "Portal 2.5" is not "Portal 2".
+    let stem = match name.rsplit_once('.') {
+        Some((stem, ext)) if (1..=4).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) => stem,
+        _ => name,
+    }
+    .trim();
     let lower = stem.to_ascii_lowercase();
     let stem = if lower.ends_with("- kryoto") { stem[..stem.len() - "- kryoto".len()].trim() } else { stem };
-    if stem.is_empty() { "Game".into() } else { stem.to_string() }
+    const GENERIC: [&str; 9] = ["download", "downloads", "file", "files", "game", "archive", "release", "d", "attachment"];
+    if stem.is_empty() || GENERIC.iter().any(|g| stem.eq_ignore_ascii_case(g)) {
+        return None;
+    }
+    // A token or a hash: one long word of letters, digits, `-`, `_` and dots.
+    let tokenish = stem.len() >= 24 && stem.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if tokenish {
+        return None;
+    }
+    Some(stem.to_string())
 }
 
 /// A name that is safe as a single path component on every OS.
@@ -462,14 +569,32 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
 
     // Named before waiting for a free slot, so a queued download reads as its
     // game rather than as its slug until the ones ahead of it finish.
-    let item = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let mut item = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let endpoint = crate::settings::catalog_endpoint(&settings);
+    // Nothing said which game this is (no page, no context the page could
+    // pass on): look it up on kryo.to by the name the file downloads as, so
+    // it still installs with its art, its exe and its place in the library.
+    if item.slug.is_none() {
+        let name = file_name_in_link(&item.url)
+            .and_then(|n| title_in_file_name(&n))
+            .or_else(|| (!is_placeholder(&item.meta.title, None)).then(|| item.meta.title.clone()));
+        if let Some(name) = name {
+            if let Some(slug) = find_slug(&client, &endpoint, &name).await {
+                item = edit(app, id, |d| d.slug = Some(slug)).ok_or("The download is gone.")?;
+                emit(app, true);
+            }
+        }
+    }
     if item.meta.executable.is_empty() && item.meta.version.is_none() {
         if let Some(slug) = &item.slug {
-            let endpoint = crate::settings::catalog_endpoint(&settings);
             if let Some(meta) = fetch_meta(&client, &endpoint, slug).await {
                 edit(app, id, |d| {
                     d.total = d.total.or(meta.size_bytes);
+                    let named = std::mem::take(&mut d.meta.title);
                     d.meta = meta;
+                    if d.meta.title.trim().is_empty() {
+                        d.meta.title = named;
+                    }
                 });
                 emit(app, true);
             }
@@ -713,6 +838,7 @@ async fn transfer<R: Runtime>(
             .get(reqwest::header::CONTENT_DISPOSITION)
             .and_then(|v| v.to_str().ok())
             .and_then(filename_from_disposition)
+            .or_else(|| file_name_in_link(&item.url))
             .or_else(|| {
                 response.url().path_segments().and_then(|mut s| s.next_back()).map(String::from)
             })
@@ -853,6 +979,7 @@ async fn transfer_parallel<R: Runtime>(
             .get(reqwest::header::CONTENT_DISPOSITION)
             .and_then(|v| v.to_str().ok())
             .and_then(filename_from_disposition)
+            .or_else(|| file_name_in_link(&item.url))
             .or_else(|| probe.url().path_segments().and_then(|mut s| s.next_back()).map(String::from))
             .map(|n| safe_name(&n))
             .unwrap_or_else(|| format!("{}.7z", safe_name(&item.meta.title)));
@@ -1035,10 +1162,7 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     set_status(app, id, Status::Extracting, None);
     let item = edit(app, id, |_| {}).ok_or("The download is gone.")?;
     let archive = PathBuf::from(&item.archive_path);
-    let title = if item.meta.title.trim().is_empty()
-        || item.meta.title == "Download"
-        || item.slug.as_deref() == Some(item.meta.title.as_str())
-    {
+    let title = if is_placeholder(&item.meta.title, item.slug.as_deref()) {
         title_from_file(&item.file_name)
     } else {
         item.meta.title.clone()
@@ -1478,6 +1602,32 @@ mod tests {
         assert_eq!(title_from_file("Captain Hardcore - Kryoto.7z"), "Captain Hardcore");
         assert_eq!(title_from_file("Portal 2.zip"), "Portal 2");
         assert_eq!(title_from_file(".7z"), "Game");
+    }
+
+    /// A download with no name from anywhere else was called "download" - the
+    /// last piece of an address is not a game.
+    #[test]
+    fn generic_file_names_name_nothing() {
+        for name in ["download", "Download.7z", "file", "d", "eyJrIjoiYWJjIiwiZXhwIjoxfQ.c2lnbmF0dXJlc2lnbmF0dXJl"] {
+            assert_eq!(title_in_file_name(name), None, "{name}");
+        }
+        assert_eq!(title_in_file_name("Hades II - Kryoto.7z").as_deref(), Some("Hades II"));
+        assert_eq!(title_in_file_name("Portal 2.5 Remix.7z").as_deref(), Some("Portal 2.5 Remix"));
+        assert!(is_placeholder("download", None));
+        assert!(is_placeholder("hades-ii", Some("hades-ii")));
+        assert!(!is_placeholder("Hades II", Some("hades-ii")));
+    }
+
+    /// dl.kryo.to's link carries the name the file saves as.
+    #[test]
+    fn the_link_names_its_file() {
+        // {"k":"a/b","exp":1,"n":"Hades II - Kryoto.7z"}, as lib/dl-token.ts mints it.
+        let body = "eyJrIjoiYS9iIiwiZXhwIjoxLCJuIjoiSGFkZXMgSUkgLSBLcnlvdG8uN3oifQ";
+        let url = format!("https://dl.kryo.to/d/{body}.c2ln");
+        assert_eq!(file_name_in_link(&url).as_deref(), Some("Hades II - Kryoto.7z"));
+        assert_eq!(file_name_in_link("https://dl.kryo.to/x/abc"), None);
+        assert_eq!(file_name_in_link("https://dl.kryo.to/d/%%%"), None);
+        assert_eq!(base64url("aGk").as_deref(), Some(&b"hi"[..]));
     }
 
     #[test]

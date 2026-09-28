@@ -165,7 +165,7 @@ fn overview<R: Runtime>(app: &AppHandle<R>) -> Result<StorageOverview, String> {
         }
     }
     for f in &mut out {
-        f.games.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        f.games.sort_by_key(|g| std::cmp::Reverse(g.bytes));
     }
     Ok(StorageOverview { folders: out, elsewhere })
 }

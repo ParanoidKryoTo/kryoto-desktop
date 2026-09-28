@@ -473,9 +473,10 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       if (known.current.has(d.id)) continue
       known.current.add(d.id)
       // Before kryo.to has named it, the title is a slug or a placeholder.
-      const named = d.meta.title && d.meta.title !== 'Download' && d.meta.title !== d.slug
+      const title = d.meta.title?.trim() ?? ''
+      const named = title !== '' && title.toLowerCase() !== 'download' && title !== d.slug
       push({
-        title: named ? `Downloading ${d.meta.title}` : 'Download started',
+        title: named ? `Downloading ${title}` : 'Download started',
         body: 'It installs itself when done. Open Downloads to watch it.',
         gameId: null,
       })
@@ -522,7 +523,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   } else if (view.kind === 'downloads') {
     content = (
       <div className="absolute inset-0 flex bg-background">
-        <DownloadsPage list={dl} onOpenGame={(id) => go({ kind: 'game', id })} onStore={() => openWeb('/')} />
+        <DownloadsPage
+          list={dl}
+          onOpenGame={(id) => go({ kind: 'game', id })}
+          onStore={() => openWeb('/')}
+          onDonate={account.supporter ? null : () => openWeb('/donate')}
+        />
       </div>
     )
   } else if (view.kind === 'home' || view.kind === 'game') {

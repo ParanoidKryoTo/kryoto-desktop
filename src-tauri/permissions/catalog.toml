@@ -1,4 +1,4 @@
 [[permission]]
 identifier = "allow-report-catalog-state"
-description = "Allow the hosted catalog to report navigation state to the desktop shell."
-commands.allow = ["report_catalog_state", "store_nav_button"]
+description = "Allow the hosted catalog to report navigation state to the desktop shell, and to name the download it is about to start."
+commands.allow = ["report_catalog_state", "store_nav_button", "store_expect_download"]

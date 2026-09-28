@@ -42,7 +42,7 @@ fn protons_in(dirs: &[PathBuf]) -> Vec<CompatTool> {
         }
     }
     // Newest first: "GE-Proton10-3" before "GE-Proton9-27", "Proton 9.0" before "Proton 8.0".
-    out.sort_by(|a, b| natural_key(&b.name).cmp(&natural_key(&a.name)));
+    out.sort_by_key(|t| std::cmp::Reverse(natural_key(&t.name)));
     out
 }
 
@@ -140,7 +140,7 @@ mod tests {
                 std::fs::write(d.join("proton"), "#!/bin/sh\n").unwrap();
             }
         }
-        let found: Vec<String> = protons_in(&[root.clone()]).into_iter().map(|t| t.name).collect();
+        let found: Vec<String> = protons_in(std::slice::from_ref(&root)).into_iter().map(|t| t.name).collect();
         assert_eq!(found, ["Proton 8.0", "GE-Proton10-3", "GE-Proton9-27"]);
         let _ = std::fs::remove_dir_all(root);
     }

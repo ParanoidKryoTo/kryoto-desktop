@@ -1,0 +1,106 @@
+name: CI
+
+# Every push to main and every pull request: the UI typechecks and builds,
+# and the native side compiles, passes its tests and clippy on BOTH platforms
+# the app ships for. Windows matters most - it is where most players are, and
+# the code under `cfg(windows)` (WebView2, the registry, the installer) is
+# never compiled by a Linux-only check.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch cancels the run still going for the first.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: Versions agree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # package.json feeds the About box, Cargo.toml the user agent kryo.to
+      # sees, tauri.conf.json the installer and the release tag. They drift
+      # apart silently when one is bumped by hand.
+      - name: package.json, Cargo.toml and tauri.conf.json have one version
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            const conf = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+            const cargo = (fs.readFileSync("src-tauri/Cargo.toml", "utf8").match(/^version\s*=\s*"([^"]+)"/m) || [])[1];
+            console.log({ pkg, conf, cargo });
+            if (!(pkg === conf && conf === cargo)) {
+              console.error("::error::Versions differ: package.json " + pkg + ", tauri.conf.json " + conf + ", Cargo.toml " + cargo);
+              process.exit(1);
+            }
+          '
+
+  ui:
+    name: UI (typecheck, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+  native:
+    name: Native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.04, not ubuntu-latest: Tauri's Linux packages below keep these
+        # names there; 24.04 renamed the appindicator one.
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      # `tauri::generate_context!` embeds the built UI, so the Rust side does
+      # not compile without dist/.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings

@@ -58,6 +58,12 @@ export type KryoAddon = {
   version: string | null
   download_size: string | null
   links: { name: string | null }[]
+  /**
+   * kryo.to's word on whether to offer it for this game: `false` for the
+   * Online add-on on a game Steam lists no online play for, or whose release
+   * already brings its own. Absent from older answers.
+   */
+  offered?: boolean
 }
 
 export async function fetchAddons(slug: string): Promise<KryoAddon[]> {

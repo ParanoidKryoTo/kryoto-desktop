@@ -425,7 +425,7 @@ mod tests {
         std::fs::rename(root.join("bin/steam_appid.txt"), root.join("bin/steam_appid.txt.kryoto-original")).unwrap();
         rec.saved.push(("bin/steam_appid.txt".into(), "bin/steam_appid.txt.kryoto-original".into()));
         assert_eq!(std::fs::read_to_string(&dll).unwrap(), "proxy");
-        assert!(config_dirs(&root, &[dll.clone()]).contains(&root.join("bin")));
+        assert!(config_dirs(&root, std::slice::from_ref(&dll)).contains(&root.join("bin")));
 
         undo_files(&root, &rec);
         assert_eq!(std::fs::read_to_string(&dll).unwrap(), "valve");

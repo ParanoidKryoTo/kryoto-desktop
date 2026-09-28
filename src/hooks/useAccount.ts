@@ -7,6 +7,8 @@ export type Account = {
   displayName: string | null
   avatarUrl: string | null
   appearance?: AccountAppearance | null
+  /** A kryo.to supporter, or someone who bought "no ads": never asked to donate. */
+  supporter?: boolean
 }
 
 /**
