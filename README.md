@@ -83,10 +83,16 @@ release by itself.
 The same release carries the updater's files: a `.sig` beside each installer
 and `latest.json`, which every installed copy reads from
 `releases/latest/download/latest.json`. They are signed with the repository
-secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-(the same key as Kryoto Forge; its public half is `plugins.updater.pubkey` in
-`tauri.conf.json`). The release refuses to build without them, because a
-release with no `latest.json` is one no installed copy ever hears about.
+secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`,
+a key of Kryoto Desktop's own whose public half is `plugins.updater.pubkey` in
+`tauri.conf.json`. The release refuses to build without them, because a
+release with no `latest.json` is one no installed copy ever hears about, and
+refuses a key that does not match that public half.
+
+Keep the private key and its password somewhere besides the repository
+secrets (GitHub never shows a secret again). Losing it means a new key pair,
+and copies installed with the old public key cannot update past that point:
+they need one manual reinstall.
 
 Keep `@tauri-apps/api` and `@tauri-apps/cli` on the same minor version as the
 `tauri` crate in `Cargo.lock`: `tauri build` stops on a mismatch.

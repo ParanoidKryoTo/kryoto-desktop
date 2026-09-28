@@ -68,7 +68,7 @@
       "endpoints": [
         "https://github.com/kyrotooooo/kryoto-desktop/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBREE1RDZBREQ1Qzc0OUMKUldTY2RGemRhbDNhK2dieHY3Yjl0bktqL3E0amJWeFVvNzRYR3J2N2EyUE5hc0NQUkdxWjBMRzcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDNDNEOUZFQUE4MUVDMDAKUldRQTdJR3EvdGxEUEcyclFXTzFldDRhQ2FON1gvQ0dMRXEvVDdkclNuVkZ6S2VqM01LTWJMdkgK",
       "windows": {
         "installMode": "passive"
       }

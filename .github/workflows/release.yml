@@ -17,8 +17,8 @@ name: Release
 # (.sig) beside each installer, and latest.json, which every installed copy
 # reads from releases/latest/download/latest.json (tauri.conf.json
 # `plugins.updater`). Signing uses the TAURI_SIGNING_PRIVATE_KEY secret (and
-# its _PASSWORD) - the same key as Kryoto Forge, whose public half is in
-# tauri.conf.json. Without it there is no latest.json and no installed copy
+# its _PASSWORD) - Kryoto Desktop's own key, whose public half is
+# `plugins.updater.pubkey` in tauri.conf.json. Without it there is no latest.json and no installed copy
 # ever sees a new version, so the build refuses to run.
 on:
   push:
@@ -144,7 +144,7 @@ jobs:
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if [ -z "$KEY" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Without it there is no latest.json, and every installed copy stays on its current version. Copy it (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD) from kryoto-forge's secrets and re-run."
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Without it there is no latest.json, and every installed copy stays on its current version. Set it (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD) in the repository secrets: the key whose public half is plugins.updater.pubkey in tauri.conf.json."
             exit 1
           fi
 
