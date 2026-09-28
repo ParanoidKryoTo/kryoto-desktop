@@ -1,0 +1,88 @@
+name: Preview build
+
+# Installers for testing a pull request, without releasing anything.
+#
+# Add the `preview-build` label to a PR (and every push after that rebuilds
+# it), or run this by hand from the Actions tab. The installers are attached
+# to the workflow run as artifacts - nothing goes on a GitHub release and no
+# latest.json is written, so no installed copy is offered this build. The
+# version stays whatever the branch has; the real release still happens on the
+# version bump (release.yml).
+#
+# Running by hand needs this file on the default branch first (GitHub only
+# lists workflows from there). The label works on any PR that carries it.
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: preview-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'preview-build')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-22.04
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      - run: pnpm install --frozen-lockfile
+
+      # No updater artifacts: they need the signing key, which a PR build must
+      # not touch, and a preview is never offered as an update anyway.
+      - name: Build the installers
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          echo '{"bundle":{"createUpdaterArtifacts":false}}' > preview.conf.json
+          pnpm app:build --config preview.conf.json
+
+      - name: Collect them
+        shell: bash
+        run: |
+          bundle=src-tauri/target/release/bundle
+          mkdir -p out
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            cp "$bundle"/nsis/*-setup.exe out/
+          else
+            cp "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb out/
+          fi
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kryoto-desktop-${{ matrix.platform }}-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || format('run{0}', github.run_number) }}
+          path: out/*
+          retention-days: 14
