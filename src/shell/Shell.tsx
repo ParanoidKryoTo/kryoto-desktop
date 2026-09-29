@@ -37,7 +37,8 @@ import type { Account } from '@/hooks/useAccount'
 import { useInbox } from '@/hooks/useInbox'
 import { setSavedStatus, useSaved } from '@/hooks/useSaved'
 import type { useBrowserPage } from '@/hooks/useBrowserPage'
-import { useDownloads } from '@/lib/downloads'
+import { downloads, useDownloads } from '@/lib/downloads'
+import { useOnline } from '@/lib/online'
 import { useSettings } from '@/lib/settings'
 import * as nav from '@/lib/history'
 import type { View } from '@/lib/history'
@@ -94,6 +95,8 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const lib = useLibrary()
   const { inbox, news, markAllRead } = useInbox()
   const dl = useDownloads()
+  const dlRef = useRef(dl)
+  dlRef.current = dl
   const saved = useSaved()
   const { state: page, actions: web } = browser
   const { toasts, push, dismiss } = useToasts()
@@ -184,8 +187,9 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const [overlay, setOverlay] = useState<Overlay | null>(null)
   const [ctx, setCtx] = useState<{ game: LibraryGame; x: number; y: number } | null>(null)
   // Menus open in their own window over the Store; only dialogs hide it.
+  const online = useOnline()
   const storeVisible =
-    (view.kind === 'web' || (view.kind === 'settings' && isWebSection(view.section))) && !overlay && !page.error
+    online && (view.kind === 'web' || (view.kind === 'settings' && isWebSection(view.section))) && !overlay && !page.error
   // A guest has no kryo.to settings to show; the client's own are all there is.
   const openSettings = useCallback(
     (section: SettingsSection = 'general') => go({ kind: 'settings', section: guest && isWebSection(section) ? 'general' : section }),
@@ -201,6 +205,23 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   useEffect(() => {
     void setStoreVisible(storeVisible)
   }, [storeVisible])
+
+  // Back online: the Store's page (whatever the web view showed while the
+  // line was down is an error page), who is signed in, and every download
+  // that stopped because the connection went.
+  const wasOnline = useRef(online)
+  useEffect(() => {
+    if (online && !wasOnline.current) {
+      web.reload()
+      void call('store_refresh_account').catch(() => {})
+      for (const d of dlRef.current) {
+        if (d.status === 'failed' && /connection|network|dns|timed out|offline|resolve|reach/i.test(d.error ?? '')) {
+          void downloads.resume(d.id).catch(() => {})
+        }
+      }
+    }
+    wasOnline.current = online
+  }, [online, web])
 
   // F11, like every other full-screen app.
   useEffect(() => {
@@ -658,6 +679,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   return (
     <div className="flex h-full flex-col bg-background">
       <TitleBar
+        offline={!online}
         account={account}
         inbox={inbox}
         news={news}
@@ -685,7 +707,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         {/* Always mounted: the Store loads (and says who is signed in) even
             when the client opens on the Library. */}
         <div className="absolute inset-0" style={{ visibility: view.kind === 'web' ? 'visible' : 'hidden' }}>
-          <WebSlot page={page} onRetry={web.retry} />
+          <WebSlot page={page} onRetry={web.retry} offline={!online} onLibrary={() => go({ kind: 'home' })} />
         </div>
         {content}
       </main>

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Download, HeartHandshake, Pause, Play, RotateCw, X } from 'lucide-react'
 import { AsciiBar, AsciiSpark, Button, Caption, IconButton, Label } from '@/ui'
 import { downloads as api, formatBytes, formatEta, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
-import { Art } from '@/library/LibraryHome'
+import { Art } from '@/library/Art'
+import { capsulesFor } from '@/lib/library'
 import { EmptyState } from '@/ui/EmptyState'
 import { INBOX } from '@/ui/ascii/scenes'
 
@@ -81,11 +82,6 @@ function Donate({ onDonate }: { onDonate: () => void }) {
   )
 }
 
-function capsule(d: Dl): string | null {
-  const m = (d.meta.hero ?? d.meta.cover ?? '').match(/\/apps\/(\d+)\//)
-  return m ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${m[1]}/header.jpg` : d.meta.cover
-}
-
 function Current({ d }: { d: Dl }) {
   const samples = useSpeedHistory(d)
   // Past the download: checking the hash, then unpacking.
@@ -93,7 +89,7 @@ function Current({ d }: { d: Dl }) {
   const fraction = extracting ? (d.extractTotal ? d.extracted / d.extractTotal : null) : d.total ? d.received / d.total : null
   return (
     <section className="kryo-radius kryo-in grid grid-cols-[260px_1fr] gap-6 border border-border bg-card p-5">
-      <Art adult={d.meta.nsfw} src={capsule(d)} title={d.meta.title} className="kryo-radius aspect-[460/215] w-full object-cover" />
+      <Art adult={d.meta.nsfw} src={capsulesFor(d.meta)[0]} fallback={capsulesFor(d.meta).slice(1)} title={d.meta.title} where="downloads" className="kryo-radius aspect-[460/215] w-full object-cover" />
       <div className="grid content-start gap-4">
         <div className="flex items-start justify-between gap-4">
           <div className="grid gap-1">
@@ -150,7 +146,7 @@ function Row({ d, onOpenGame }: { d: Dl; onOpenGame: (id: string) => void }) {
             : 'Queued'
   return (
     <div className="kryo-radius grid grid-cols-[150px_1fr_auto] items-center gap-4 border border-border bg-card p-3">
-      <Art adult={d.meta.nsfw} src={capsule(d)} title={d.meta.title} className="kryo-radius aspect-[460/215] w-full object-cover" />
+      <Art adult={d.meta.nsfw} src={capsulesFor(d.meta)[0]} fallback={capsulesFor(d.meta).slice(1)} title={d.meta.title} where="downloads" className="kryo-radius aspect-[460/215] w-full object-cover" />
       <div className="grid min-w-0 gap-1.5">
         <b className="truncate text-sm text-foreground">{d.meta.title}</b>
         <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -159,6 +155,7 @@ function Row({ d, onOpenGame }: { d: Dl; onOpenGame: (id: string) => void }) {
         </span>
         {d.status === 'paused' || d.status === 'queued' ? <AsciiBar fraction={pct} cells={30} /> : null}
         {d.error ? <span className="text-xs text-destructive">{d.error}</span> : null}
+        {d.warning ? <span className="text-xs leading-relaxed text-warning">{d.warning}</span> : null}
       </div>
       <div className="flex gap-2">
         {d.status === 'installed' && d.gameId ? (

@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { ChevronDown, Play } from 'lucide-react'
 import { Button, Label, MenuButton } from '@/ui'
-import { capsuleFor, type LibraryGame } from '@/lib/library'
+import { capsulesFor, type LibraryGame } from '@/lib/library'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
-import { adultBlur, useShowAdult } from '@/lib/adult'
-import { cn } from '@/lib/utils'
 import { usePersisted } from '@/hooks/usePersisted'
+import { Art } from '@/library/Art'
+
+export { Art }
 
 type Sort = 'alpha' | 'recent' | 'playtime' | 'added'
 
@@ -60,7 +61,7 @@ export function LibraryHome({
           onContextMenu={ctx(last)}
           className="kryo-radius kryo-in relative h-64 overflow-hidden border border-border bg-card"
         >
-          <Art adult={last.nsfw} src={last.hero ?? last.cover} title="" className="absolute inset-0 size-full object-cover" />
+          <Art adult={last.nsfw} src={last.hero} fallback={[last.header, last.cover]} title="" className="absolute inset-0 size-full object-cover" />
           <div className="hero-side absolute inset-0" />
           <div className="relative flex h-full flex-col justify-end gap-3 p-7">
             <span className="text-[10px] uppercase tracking-[0.25em] text-muted-foreground">
@@ -95,7 +96,7 @@ export function LibraryHome({
                 onContextMenu={ctx(g)}
                 className="kryo-radius group grid overflow-hidden border border-border bg-card text-left transition-[transform,border-color] duration-200 hover:-translate-y-0.5 hover:border-foreground/50"
               >
-                <Art adult={g.nsfw} src={capsuleFor(g)} title={g.title} className="aspect-[460/215] w-full object-cover" />
+                <Art adult={g.nsfw} src={capsulesFor(g)[0]} fallback={capsulesFor(g).slice(1)} title={g.title} className="aspect-[460/215] w-full object-cover" />
                 <span className="grid gap-0.5 px-3 py-2.5">
                   <span className="truncate text-xs font-bold text-foreground">{g.title}</span>
                   <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -132,7 +133,7 @@ export function LibraryHome({
               className="kryo-radius group relative aspect-[2/3] overflow-hidden border border-border bg-card transition-[transform,border-color] duration-200 hover:-translate-y-1 hover:border-foreground/60"
             >
               <button type="button" onClick={() => onOpen(g.id)} className="kryo-square absolute inset-0" aria-label={`Open ${g.title}`}>
-                <Art adult={g.nsfw} src={g.cover} title={g.title} className="size-full object-cover" />
+                <Art adult={g.nsfw} src={g.cover} fallback={[g.header]} title={g.title} className="size-full object-cover" />
               </button>
               {running.has(g.id) ? (
                 <span className="kryo-pill absolute left-2 top-2 flex items-center gap-1 bg-background/80 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-success backdrop-blur">
@@ -156,47 +157,3 @@ export function LibraryHome({
   )
 }
 
-/** Art, or the title on a plain card when the image is missing. */
-export function Art({
-  src,
-  title,
-  className,
-  adult = false,
-}: {
-  src: string | null
-  title: string
-  className?: string
-  /** An adult game: blurred unless Settings says to show it. */
-  adult?: boolean
-}) {
-  // A host that is slow or refuses once often answers the second time; try
-  // twice more (a second, then three) before drawing the title instead.
-  const [tries, setTries] = useState(0)
-  const [failed, setFailed] = useState(false)
-  const showAdult = useShowAdult()
-  useEffect(() => {
-    setTries(0)
-    setFailed(false)
-  }, [src])
-  if (!src || failed) {
-    return (
-      <span className={`grid place-items-center bg-secondary p-3 text-center text-xs font-bold uppercase tracking-wider text-muted-foreground ${className ?? ''}`}>
-        {title}
-      </span>
-    )
-  }
-  const retry = () => {
-    if (tries >= 2) return setFailed(true)
-    window.setTimeout(() => setTries((t) => t + 1), tries === 0 ? 1000 : 3000)
-  }
-  return (
-    <img
-      key={tries}
-      src={tries ? `${src}${src.includes('?') ? '&' : '?'}r=${tries}` : src}
-      alt=""
-      loading="lazy"
-      onError={retry}
-      className={cn(className, adultBlur(adult, showAdult))}
-    />
-  )
-}

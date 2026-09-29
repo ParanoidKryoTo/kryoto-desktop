@@ -1,4 +1,5 @@
 mod addons;
+mod art;
 mod compat;
 mod downloads;
 mod launch;
@@ -871,6 +872,7 @@ pub fn run() {
             // Off the main thread: registry and xdg-mime are not worth a frame.
             std::thread::spawn(links::register);
             downloads::init(app.handle());
+            art::prune(app.handle(), 512 * 1024 * 1024);
             if let Some(l) = listener.take() {
                 system::serve_instance(app.handle().clone(), l);
             }
@@ -884,6 +886,16 @@ pub fn run() {
                 }
             }
             Ok(())
+        })
+        // Game art, cached on this PC (art.rs). Only the shell's own views may
+        // ask: a Store page has no business reaching through it.
+        .register_asynchronous_uri_scheme_protocol(art::SCHEME, |ctx, request, responder| {
+            if !matches!(ctx.webview_label(), "main" | menus::LABEL) {
+                responder.respond(tauri::http::Response::builder().status(403).body(Vec::new()).unwrap_or_default());
+                return;
+            }
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn(async move { responder.respond(art::serve(app, request).await) });
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {

@@ -4,8 +4,7 @@ import { AsciiBar, Button, Caption, Card, IconButton, Label, MenuList, useDismis
 import { fetchCatalogGame, type CatalogGame } from '@/lib/library'
 import { isActive, phaseOf, progressOf, type Download as DownloadItem } from '@/lib/downloads'
 import { errorText } from '@/lib/bridge'
-import { cn } from '@/lib/utils'
-import { adultBlur, useShowAdult } from '@/lib/adult'
+import { GameBanner } from '@/library/Art'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 
 /**
@@ -39,20 +38,20 @@ export function CatalogGamePage({
 }) {
   const [game, setGame] = useState<CatalogGame | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [heroFailed, setHeroFailed] = useState(false)
   const [statusOpen, setStatusOpen] = useState(false)
   const statusRef = useRef<HTMLDivElement | null>(null)
   useDismiss(statusOpen, statusRef, () => setStatusOpen(false))
-  const showAdult = useShowAdult()
 
   useEffect(() => {
     setGame(null)
     setError(null)
-    setHeroFailed(false)
     let cancelled = false
     fetchCatalogGame(slug)
       .then((g) => !cancelled && setGame(g))
-      .catch((e) => !cancelled && setError(errorText(e)))
+      .catch((e) =>
+        !cancelled &&
+        setError(navigator.onLine ? errorText(e) : 'This PC is offline. Its description and art come from kryo.to and show up once the connection is back.'),
+      )
     return () => {
       cancelled = true
     }
@@ -61,28 +60,18 @@ export function CatalogGamePage({
   const title = game?.title ?? fallback.title
   // Unknown counts as adult until kryo.to has said, like the rail's covers.
   const adult = game ? game.nsfw : true
-  const hero = !heroFailed && game?.hero ? game.hero : (game?.cover ?? fallback.cover)
   const going = download && (isActive(download) || download.status === 'paused') ? download : null
 
   return (
     <section aria-label={title} className="min-h-0 grow overflow-auto">
-      <div className="relative h-80 overflow-hidden">
-        {hero ? (
-          <img
-            src={hero}
-            alt=""
-            onError={() => setHeroFailed(true)}
-            className={cn('absolute inset-0 size-full object-cover object-top', heroFailed && 'scale-110 blur-2xl', adultBlur(adult, showAdult))}
-          />
-        ) : (
-          <div className="absolute inset-0 bg-card" />
-        )}
-        <div className="hero-fade absolute inset-0" />
-        <div className="absolute inset-x-8 bottom-8 grid gap-2">
-          <Caption>Not on this PC</Caption>
-          <h1 className="max-w-3xl text-4xl font-bold leading-tight text-foreground drop-shadow-[0_4px_20px_rgba(0,0,0,0.8)]">{title}</h1>
-        </div>
-      </div>
+      <GameBanner
+        title={title}
+        adult={adult}
+        pending={!game && !error}
+        banners={[game?.hero, ...(game?.screenshots.slice(0, 1) ?? []), game?.header, fallback.cover]}
+        logo={game?.logo}
+        caption={<Caption>Not on this PC</Caption>}
+      />
 
       <div className="kryo-radius relative z-10 mx-6 -mt-2 flex flex-wrap items-center gap-6 border border-border bg-card/90 p-4 backdrop-blur">
         {going ? (

@@ -8,6 +8,7 @@ import { GUEST, useAccount } from '@/hooks/useAccount'
 import { useBrowserPage } from '@/hooks/useBrowserPage'
 import { call } from '@/lib/bridge'
 import { logInfo } from '@/lib/log'
+import { useOnline } from '@/lib/online'
 
 type Phase = 'splash' | 'welcome' | 'main'
 
@@ -51,6 +52,7 @@ export default function App() {
   const settings = useSettings()
   const account = useAccount()
   const browser = useBrowserPage()
+  const online = useOnline()
   const [guest, setGuestState] = useState(loadGuest)
   const setGuest = useCallback((on: boolean) => {
     saveGuest(on)
@@ -87,12 +89,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // Still no answer about the account after a while: load kryo.to again.
+  // Still no answer about the account after a while: load kryo.to again
+  // (not while offline: there is nothing to load it from).
   useEffect(() => {
-    if (!isTauri() || account !== undefined) return
+    if (!isTauri() || account !== undefined || !online) return
     const t = window.setTimeout(() => void browserNavigate(STORE_HOME).catch(() => {}), 8000)
     return () => window.clearTimeout(t)
-  }, [account])
+  }, [account, online])
 
   const enterMain = useCallback(() => {
     void applyWindow('main').then(() => setPhase('main'))

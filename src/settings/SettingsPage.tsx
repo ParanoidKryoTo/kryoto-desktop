@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { artSrc } from '@/lib/art'
 import { Bell, Code2, Download, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
@@ -86,7 +87,7 @@ export function SettingsPage({
       <nav aria-label="Settings" className="flex min-h-0 flex-col gap-5 overflow-auto border-r border-border bg-card/40 p-3">
         <div className="flex items-center gap-2.5 px-2 pt-2">
           {account.avatarUrl ? (
-            <img src={account.avatarUrl} alt="" className="kryo-pill size-9 object-cover" />
+            <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-9 object-cover" />
           ) : (
             <span className="kryo-pill grid size-9 place-items-center bg-secondary text-xs font-bold">{name.slice(0, 1).toUpperCase()}</span>
           )}
@@ -251,10 +252,10 @@ function DesktopPane({ section }: { section: SettingsSection }) {
         {section === 'storage' ? <StoragePane onChanged={() => void settingsApi.get().then((v) => setS((cur) => (cur ? { ...cur, libraryDir: v.libraryDir, libraryFolders: v.libraryFolders } : v)))} /> : null}
         {section === 'downloads' ? (
           <>
-            <Section title="Connections" hint="More connections download faster on most lines. One is the slow, careful way.">
+            <Section title="Connections" hint="More connections download faster on most lines, the way a download manager does. One is the slow, careful way.">
               <Segmented
                 value={String(s.connections)}
-                options={['1', '4', '8', '16'].map((v) => ({ value: v, label: v }))}
+                options={['1', '4', '8', '16', '32'].map((v) => ({ value: v, label: v }))}
                 onChange={(v) => set('connections', Number(v))}
               />
             </Section>

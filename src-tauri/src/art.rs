@@ -1,0 +1,217 @@
+//! Game art, kept on this PC.
+//!
+//! Every image the shell draws for a game (covers, banners, logos) is asked
+//! for as `kimg://localhost/<url>` (`http://kimg.localhost/<url>` on Windows).
+//! The first time, it is fetched and written to the cache folder; after that
+//! it comes from disk, so the Library, a game's page and Downloads look the
+//! same with no connection at all. A failure is logged once per address, with
+//! the address and why, instead of an image that quietly never appears.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+use sha2::{Digest, Sha256};
+use tauri::http::{Request, Response, StatusCode};
+use tauri::{AppHandle, Manager, Runtime};
+
+pub const SCHEME: &str = "kimg";
+
+/// Largest image kept (a 4K hero is about 3 MB).
+const MAX_BYTES: usize = 25 * 1024 * 1024;
+
+fn dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let d = app.path().app_cache_dir().ok()?.join("art");
+    std::fs::create_dir_all(&d).ok()?;
+    Some(d)
+}
+
+fn key(url: &str) -> String {
+    let hash = Sha256::digest(url.as_bytes());
+    hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The image type from its first bytes (the cache keeps no headers).
+fn mime(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0xFF, 0xD8, ..] => "image/jpeg",
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [b'G', b'I', b'F', ..] => "image/gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', ..] => "image/avif",
+        _ if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The remote address in a `kimg` request: everything after the host,
+/// percent-decoded.
+fn target(request: &Request<Vec<u8>>) -> Option<url::Url> {
+    let raw = request.uri().path().trim_start_matches('/');
+    let decoded = percent_decode(raw)?;
+    let url = url::Url::parse(&decoded).ok()?;
+    matches!(url.scheme(), "http" | "https").then_some(url)
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let mut out = Vec::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+/// Log a failed address once per run.
+fn report(url: &str, why: &str) {
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    let Ok(mut seen) = SEEN.lock() else { return };
+    if seen.get_or_insert_with(HashSet::new).insert(url.to_string()) {
+        crate::logging::error("art", &format!("{url}: {why}"));
+    }
+}
+
+fn respond(status: StatusCode, bytes: Vec<u8>) -> Response<Vec<u8>> {
+    let mut builder = Response::builder().status(status).header("Access-Control-Allow-Origin", "*");
+    if status.is_success() {
+        builder = builder.header("Content-Type", mime(&bytes)).header("Cache-Control", "max-age=31536000, immutable");
+    }
+    builder.body(bytes).unwrap_or_default()
+}
+
+/// Answer one `kimg` request: from disk, else from the network (and keep it).
+pub async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let Some(url) = target(&request) else {
+        return respond(StatusCode::BAD_REQUEST, Vec::new());
+    };
+    let file = dir(&app).map(|d| d.join(key(url.as_str())));
+    if let Some(bytes) = file.as_ref().and_then(|f| std::fs::read(f).ok()).filter(|b| !b.is_empty()) {
+        return respond(StatusCode::OK, bytes);
+    }
+    match fetch(url.as_str()).await {
+        Ok(bytes) => {
+            if let Some(f) = &file {
+                let tmp = f.with_extension("part");
+                if std::fs::write(&tmp, &bytes).is_ok() {
+                    let _ = std::fs::rename(&tmp, f);
+                }
+            }
+            respond(StatusCode::OK, bytes)
+        }
+        Err(why) => {
+            report(url.as_str(), &why);
+            respond(StatusCode::NOT_FOUND, Vec::new())
+        }
+    }
+}
+
+async fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    let res = client().get(url).send().await.map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            "no connection".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+    let status = res.status();
+    if !status.is_success() {
+        return Err(format!("answered {status}"));
+    }
+    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.is_empty() || bytes.len() > MAX_BYTES {
+        return Err(format!("{} bytes", bytes.len()));
+    }
+    if mime(&bytes) == "application/octet-stream" {
+        return Err("not an image".into());
+    }
+    Ok(bytes.to_vec())
+}
+
+/// Fetch a game's art into the cache ahead of time (when it is installed), so
+/// it is there offline even if its page was never opened.
+pub fn prefetch<R: Runtime>(app: &AppHandle<R>, urls: Vec<String>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(d) = dir(&app) else { return };
+        for url in urls.into_iter().filter(|u| u.starts_with("http")) {
+            let f = d.join(key(&url));
+            if f.is_file() {
+                continue;
+            }
+            match fetch(&url).await {
+                Ok(bytes) => {
+                    let _ = std::fs::write(&f, bytes);
+                }
+                Err(why) => report(&url, &why),
+            }
+        }
+    });
+}
+
+/// Keep the cache under a size: oldest files go first. Run once at start.
+pub fn prune<R: Runtime>(app: &AppHandle<R>, max_bytes: u64) {
+    let Some(d) = dir(app) else { return };
+    let Ok(read) = std::fs::read_dir(&d) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = read
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            m.is_file().then(|| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= max_bytes {
+        return;
+    }
+    files.sort_by_key(|f| f.0);
+    for (_, len, path) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_name_their_remote_address() {
+        let req = Request::builder()
+            .uri("kimg://localhost/https%3A%2F%2Fshared.akamai.steamstatic.com%2Fa%2Fheader.jpg%3Ft%3D1")
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(target(&req).unwrap().as_str(), "https://shared.akamai.steamstatic.com/a/header.jpg?t=1");
+        let bad = Request::builder().uri("kimg://localhost/file%3A%2F%2F%2Fetc%2Fpasswd").body(Vec::new()).unwrap();
+        assert!(target(&bad).is_none());
+    }
+
+    #[test]
+    fn images_are_known_by_their_bytes() {
+        assert_eq!(mime(&[0xFF, 0xD8, 0xFF]), "image/jpeg");
+        assert_eq!(mime(b"\x89PNG\r\n"), "image/png");
+        assert_eq!(mime(b"<html>"), "application/octet-stream");
+    }
+}

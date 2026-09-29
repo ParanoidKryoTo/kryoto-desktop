@@ -1,4 +1,5 @@
-import { Bell, ChevronDown, Expand, Megaphone, Shrink } from 'lucide-react'
+import { Bell, ChevronDown, Expand, Megaphone, Shrink, WifiOff } from 'lucide-react'
+import { artSrc } from '@/lib/art'
 import { MenuButton, MenuList, type MenuEntry } from '@/ui'
 import { KryoMark } from '@/ui/ascii/KryoMark'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
@@ -18,6 +19,7 @@ import type { Inbox, News } from '@/hooks/useInbox'
  * without hiding it.
  */
 export function TitleBar({
+  offline = false,
   account,
   inbox,
   news,
@@ -28,6 +30,8 @@ export function TitleBar({
   onMarkRead,
   onAllNotifications,
 }: {
+  /** No connection: a quiet pill says so, and what needs kryo.to waits. */
+  offline?: boolean
   account: Account
   inbox: Inbox
   news: News | null
@@ -58,7 +62,16 @@ export function TitleBar({
           />
         ))}
       </nav>
-      <div data-maximize className="drag flex grow items-center justify-center">
+      <div data-maximize className="drag flex grow items-center justify-center gap-2">
+        {offline ? (
+          <span
+            title="No connection. The library, your games and settings work as usual; the Store and downloads wait for it."
+            className="kryo-pill pointer-events-auto flex items-center gap-1.5 border border-border px-2.5 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground"
+          >
+            <WifiOff className="size-3" />
+            Offline
+          </span>
+        ) : null}
         <DevEndpointNotice />
       </div>
 
@@ -119,7 +132,7 @@ export function TitleBar({
           trigger={
             <>
               {account.avatarUrl ? (
-                <img src={account.avatarUrl} alt="" className="kryo-pill size-6 object-cover" />
+                <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" />
               ) : (
                 <span className="kryo-pill grid size-6 place-items-center bg-secondary text-[10px] font-bold">{initial}</span>
               )}

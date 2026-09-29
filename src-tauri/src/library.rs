@@ -22,6 +22,10 @@ pub struct LibraryGame {
     pub slug: Option<String>,
     pub cover: Option<String>,
     pub hero: Option<String>,
+    /// The transparent title logo drawn over the hero, when Steam has one.
+    pub logo: Option<String>,
+    /// The wide store header, for rows and cards.
+    pub header: Option<String>,
     /// Absolute folder the game lives in.
     pub install_dir: String,
     /// Exe to start when no Steam entry is picked, relative to `install_dir`.

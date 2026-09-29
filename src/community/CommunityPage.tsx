@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowUpRight, Clock, Eye, MessageSquare, RotateCw, ShieldCheck, Users } from 'lucide-react'
+import { useOnline } from '@/lib/online'
+import { Art } from '@/library/Art'
+import { artSrc } from '@/lib/art'
+import { ArrowUpRight, Clock, Eye, MessageSquare, RotateCw, ShieldCheck, Users, WifiOff } from 'lucide-react'
 import { AsciiBar, Button, Caption, IconButton, Label } from '@/ui'
 import { isTauri } from '@/lib/bridge'
 import { adultBlur, useShowAdult } from '@/lib/adult'
@@ -111,9 +114,10 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
   const [stats, setStats] = useState<Stats | null>(isTauri() ? (lastStats?.stats ?? null) : PREVIEW)
   const [error, setError] = useState<string | null>(null)
   const showAdult = useShowAdult()
+  const online = useOnline()
 
   const load = useCallback(async (force = false) => {
-    if (!isTauri()) return
+    if (!isTauri() || !navigator.onLine) return
     if (!force && lastStats && Date.now() - lastStats.at < FRESH_MS) return
     setError(null)
     try {
@@ -131,7 +135,7 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
     void load()
     const t = window.setInterval(() => void load(true), 120_000)
     return () => window.clearInterval(t)
-  }, [load])
+  }, [load, online])
 
   // Your own week, from this PC: the library already counts it.
   const mine = useMemo(() => {
@@ -143,7 +147,15 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
   if (!stats) {
     return (
       <div className="grid grow place-content-center justify-items-center gap-4 text-center">
-        {error ? (
+        {!online ? (
+          <>
+            <WifiOff className="size-5 text-muted-foreground" />
+            <Label>Community</Label>
+            <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+              What the community is playing comes from kryo.to, and this PC is offline. It shows up here by itself once the connection is back.
+            </p>
+          </>
+        ) : error ? (
           <>
             <Label>Community</Label>
             <p className="max-w-sm text-xs text-muted-foreground">The statistics did not load ({error}).</p>
@@ -283,7 +295,7 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
                     >
                       <span className={cn('w-5 text-right text-xs font-bold tabular-nums', i < 3 ? 'text-foreground' : 'text-muted-foreground')}>{i + 1}</span>
                       {b.avatarUrl ? (
-                        <img src={b.avatarUrl} alt="" className="kryo-pill size-7 object-cover" />
+                        <img src={artSrc(b.avatarUrl) ?? undefined} alt="" className="kryo-pill size-7 object-cover" />
                       ) : (
                         <span className="kryo-pill grid size-7 place-items-center bg-secondary text-[10px] font-bold">
                           {(b.displayName || b.username).slice(0, 1).toUpperCase()}
@@ -397,9 +409,7 @@ function Poster({ game, blur, onClick, line }: { game: Card; blur: string; onCli
   return (
     <button type="button" onClick={onClick} className="kryo-square group grid gap-2 text-left">
       <span className="kryo-radius block aspect-[2/3] overflow-hidden border border-border bg-card">
-        {game.cover ? (
-          <img src={game.cover} alt="" loading="lazy" className={cn('size-full object-cover transition-transform duration-300 group-hover:scale-[1.03]', blur)} />
-        ) : null}
+        <Art src={game.cover} title={game.title} where="community" className={cn('size-full object-cover transition-transform duration-300 group-hover:scale-[1.03]', blur)} />
       </span>
       <span className="grid">
         <span className="truncate text-xs font-bold text-foreground">{game.title}</span>

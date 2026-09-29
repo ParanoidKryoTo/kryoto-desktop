@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { artSrc, reportArt } from '@/lib/art'
 import { usePersisted } from '@/hooks/usePersisted'
 import { Download as DownloadIcon, Home, Search } from 'lucide-react'
 import { asciiTrack, Dropdown } from '@/ui'
@@ -151,7 +152,7 @@ export function Sidebar({
                   )}
                 >
                   {cover ? (
-                    <img src={cover} alt="" className={cn('size-6 shrink-0 object-cover', adultBlur(adult, showAdult) && 'blur-[3px]')} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
+                    <img src={artSrc(cover) ?? undefined} onError={() => reportArt(cover, 'sidebar')} alt="" className={cn('size-6 shrink-0 object-cover', adultBlur(adult, showAdult) && 'blur-[3px]')} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
                   ) : (
                     <span className="size-6 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
                   )}
@@ -181,7 +182,7 @@ export function Sidebar({
             )}
           >
             {g.cover ? (
-              <img src={g.cover} alt="" className={cn("size-6 shrink-0 object-cover", adultBlur(g.nsfw, showAdult) && "blur-[3px]")} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
+              <img src={artSrc(g.cover) ?? undefined} onError={() => reportArt(g.cover!, 'sidebar')} alt="" className={cn("size-6 shrink-0 object-cover", adultBlur(g.nsfw, showAdult) && "blur-[3px]")} style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
             ) : (
               <span className="size-6 shrink-0 bg-secondary" style={{ borderRadius: 'min(var(--kryo-radius), 6px)' }} />
             )}

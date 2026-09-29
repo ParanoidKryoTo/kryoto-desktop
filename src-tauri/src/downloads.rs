@@ -47,6 +47,10 @@ pub struct CatalogMeta {
     pub title: String,
     pub cover: Option<String>,
     pub hero: Option<String>,
+    /// The transparent title logo, when Steam has one.
+    pub logo: Option<String>,
+    /// The wide store header (460x215), for rows and cards.
+    pub header: Option<String>,
     pub executable: String,
     pub default_args: String,
     pub entries: Vec<LaunchEntry>,
@@ -89,6 +93,9 @@ pub struct Download {
     /// Set when the file is one of the game's add-ons (a language pack, the
     /// Online add-on): its name, e.g. "Japanese language pack".
     pub addon: Option<String>,
+    /// Installed, but the unpacker reported damaged files (a CRC mismatch
+    /// inside the archive). Games often run anyway; this says which files.
+    pub warning: Option<String>,
 }
 
 /// One byte range of a download, on a connection of its own.
@@ -107,19 +114,29 @@ impl Segment {
     }
 }
 
-/// Split `total` bytes into up to `n` ranges of at least 16 MB each.
+/// Split `total` bytes into ranges for `n` connections to work through: four
+/// per connection, of at least 16 MB. More ranges than connections is what
+/// keeps every connection busy to the end: one that finishes early takes the
+/// next range instead of sitting idle while the slowest one crawls home.
 pub fn split(total: u64, n: u32) -> Vec<Segment> {
     if total == 0 {
         return Vec::new();
     }
     let min = 16 * 1024 * 1024;
-    let n = u64::from(n.max(1)).min((total / min).max(1));
+    let n = (u64::from(n.max(1)) * RANGES_PER_CONNECTION).min((total / min).max(1));
     let size = total.div_ceil(n);
     (0..n)
         .map(|i| Segment { start: i * size, end: ((i + 1) * size).min(total) - 1, done: 0 })
         .filter(|s| s.start < total)
         .collect()
 }
+
+const RANGES_PER_CONNECTION: u64 = 4;
+
+/// Bytes a connection gathers before writing them out. Writing each network
+/// chunk (a few KB) on its own went through the blocking pool once per chunk,
+/// which capped a download near 30 MB/s however fast the line was.
+const WRITE_BUFFER: usize = 4 * 1024 * 1024;
 
 /// A shared speed cap: every connection draws from the same budget.
 pub struct Limiter {
@@ -450,7 +467,21 @@ async fn fetch_meta(client: &reqwest::Client, endpoint: &str, slug: &str) -> Opt
         return None;
     }
     let json: serde_json::Value = res.json().await.ok()?;
-    Some(meta_from_json(&json["game"]))
+    Some(meta_from_api(&json))
+}
+
+/// A `/api/games/<slug>` answer: the game, with its `art` (real, resolved
+/// URLs from kryo.to) over anything guessed from the game row.
+pub fn meta_from_api(json: &serde_json::Value) -> CatalogMeta {
+    let mut meta = meta_from_json(&json["game"]);
+    let art = |k: &str| json["art"][k].as_str().map(str::trim).filter(|v| !v.is_empty()).map(String::from);
+    if json["art"].is_object() {
+        meta.hero = art("hero").or(meta.hero);
+        meta.logo = art("logo");
+        meta.header = art("header").or(meta.header);
+        meta.cover = art("capsule").or(meta.cover);
+    }
+    meta
 }
 
 pub fn meta_from_json(g: &serde_json::Value) -> CatalogMeta {
@@ -463,9 +494,13 @@ pub fn meta_from_json(g: &serde_json::Value) -> CatalogMeta {
     CatalogMeta {
         title: s("title").unwrap_or_default(),
         cover: s("cover_vertical").or_else(|| s("cover")),
-        hero: s("hero_image_override").or_else(|| {
-            appid.map(|a| format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{a}/library_hero.jpg"))
-        }),
+        // The legacy Steam path is only a guess (it 404s for every app with
+        // hashed art); `meta_from_api` replaces it with the real one.
+        hero: s("hero_image_override")
+            .or_else(|| g["screenshots"][0].as_str().map(String::from))
+            .or_else(|| appid.map(|a| format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{a}/library_hero.jpg"))),
+        logo: None,
+        header: s("cover_horizontal").or_else(|| s("cover")),
         executable: s("game_executable_path").unwrap_or_default(),
         default_args: s("game_executable_args").unwrap_or_default(),
         entries: entries.into_iter().filter(LaunchEntry::is_windows).collect(),
@@ -564,6 +599,8 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
     let settings = crate::settings::load(app);
     let client = reqwest::Client::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+        .tcp_nodelay(true)
+        .pool_max_idle_per_host(64)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -1006,17 +1043,37 @@ async fn transfer_parallel<R: Runtime>(
     }
 
     let path = PathBuf::from(&item.archive_path);
-    let segments = item.segments.clone();
+    let segments = Arc::new(item.segments.clone());
     let progress: Arc<Vec<AtomicU64>> = Arc::new(segments.iter().map(|s| AtomicU64::new(s.done.min(s.len()))).collect());
     let stop = Arc::new(AtomicU8::new(RUN));
+    // The unfinished ranges, handed out one at a time to whichever connection
+    // is free. A connection that fails stops taking more; the rest carry on,
+    // and the whole thing is retried from where each range got to.
+    let queue: Arc<Vec<usize>> = Arc::new((0..segments.len()).filter(|&i| segments[i].done < segments[i].len()).collect());
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let workers = (connections.max(1) as usize).min(queue.len().max(1));
     let mut tasks = Vec::new();
-    for (i, seg) in segments.iter().cloned().enumerate() {
-        if seg.done >= seg.len() {
-            continue;
-        }
-        let (client, url, path, progress, limiter, stop) =
-            (client.clone(), item.url.clone(), path.clone(), progress.clone(), limiter.clone(), stop.clone());
-        tasks.push(tokio::spawn(async move { fetch_range(&client, &url, &path, i, seg, &progress, &stop, &limiter).await }));
+    for _ in 0..workers {
+        let (client, url, path, progress, limiter, stop, segments, queue, next) = (
+            client.clone(),
+            item.url.clone(),
+            path.clone(),
+            progress.clone(),
+            limiter.clone(),
+            stop.clone(),
+            segments.clone(),
+            queue.clone(),
+            next.clone(),
+        );
+        tasks.push(tokio::spawn(async move {
+            loop {
+                let Some(&i) = queue.get(next.fetch_add(1, Ordering::SeqCst)) else { return Ok(()) };
+                if stop.load(Ordering::SeqCst) != RUN {
+                    return Ok(());
+                }
+                fetch_range(&client, &url, &path, i, segments[i].clone(), &progress, &stop, &limiter).await?;
+            }
+        }));
     }
 
     let mut last_sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
@@ -1115,6 +1172,7 @@ async fn fetch_range(
         .await
         .map_err(|e| Transfer::Fatal(format!("Cannot write {}: {e}", path.display())))?;
     file.seek(std::io::SeekFrom::Start(from)).await.map_err(|e| Transfer::Fatal(e.to_string()))?;
+    let mut file = tokio::io::BufWriter::with_capacity(WRITE_BUFFER, file);
     let mut written = done;
     let mut stream = res.bytes_stream();
     let mut failure = None;
@@ -1146,7 +1204,7 @@ async fn fetch_range(
         }
     }
     file.flush().await.map_err(|e| Transfer::Fatal(e.to_string()))?;
-    let _ = file.sync_data().await;
+    let _ = file.get_ref().sync_data().await;
     progress[index].store(written, Ordering::SeqCst);
     if let Some(e) = failure {
         return Err(Transfer::Retry(e));
@@ -1185,9 +1243,9 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     let progress_app = app.clone();
     let progress_id = id.to_string();
     let (dest_clone, staging_clone) = (dest.clone(), staging.clone());
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    let damaged = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
         let _ = std::fs::remove_dir_all(&staging_clone);
-        extract(&archive, &staging_clone, &|done, total| {
+        let damaged = extract(&archive, &staging_clone, &|done, total| {
             edit(&progress_app, &progress_id, |d| {
                 d.extracted = done;
                 d.extract_total = total;
@@ -1201,10 +1259,14 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         let top = single_child_dir(&staging_clone).unwrap_or_else(|| staging_clone.clone());
         move_tree(&top, &dest_clone).map_err(|e| format!("Installing into {} failed: {e}", dest_clone.display()))?;
         let _ = std::fs::remove_dir_all(&staging_clone);
-        Ok(())
+        Ok(damaged)
     })
     .await
     .map_err(|e| e.to_string())??;
+    let warning = damage_warning(&damaged, item.verified);
+    if let Some(w) = &warning {
+        crate::logging::error("install", &format!("{title}: {w}"));
+    }
 
     let (root, executable) = locate(&dest, &item.meta.executable);
     let game = library::upsert_installed(
@@ -1214,6 +1276,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             slug: item.slug.clone(),
             cover: item.meta.cover.clone(),
             hero: item.meta.hero.clone(),
+            logo: item.meta.logo.clone(),
+            header: item.meta.header.clone(),
             install_dir: root.to_string_lossy().into_owned(),
             executable,
             default_args: item.meta.default_args.clone(),
@@ -1229,19 +1293,46 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
     if settings.delete_archives {
         let _ = std::fs::remove_file(&item.archive_path);
     }
+    // Its art on disk now, so the Library shows it with no connection.
+    crate::art::prefetch(app, [&game.cover, &game.hero, &game.logo, &game.header].into_iter().flatten().cloned().collect());
     edit(app, id, |d| {
         d.install_dir = Some(game.install_dir.clone());
         d.game_id = Some(game.id.clone());
+        d.warning = warning.clone();
     });
     set_status(app, id, Status::Installed, None);
     let _ = app.emit("library-changed", ());
     if settings.notify_downloads {
         let _ = app.emit(
             "notify",
-            Notice::new(&format!("{title} is ready to play"), "Installed and added to your library.", Some(game.id)),
+            match &warning {
+                None => Notice::new(&format!("{title} is ready to play"), "Installed and added to your library.", Some(game.id)),
+                Some(_) => Notice::new(
+                    &format!("{title} is installed, with a warning"),
+                    "7-Zip reported a damaged file. It may still run: open Downloads for details.",
+                    Some(game.id),
+                ),
+            },
         );
     }
     Ok(())
+}
+
+/// What to tell the player when the unpacker reported damaged files.
+fn damage_warning(damaged: &[String], verified: bool) -> Option<String> {
+    let (first, rest) = damaged.split_first()?;
+    let files = match rest.len() {
+        0 => first.clone(),
+        n => format!("{first} and {n} more"),
+    };
+    let origin = if verified {
+        "The download itself is intact (it matches kryo.to's checksum), so the damage is inside the archive as it was packed."
+    } else {
+        "The download may have been cut or corrupted on the way."
+    };
+    Some(format!(
+        "7-Zip reported a checksum error in {files}. The files were unpacked anyway and many games run fine like this. {origin} If the game crashes or looks wrong, try a mirror or report the release."
+    ))
 }
 
 /// What a .7z says it unpacks to, from its headers. `None` for other formats.
@@ -1304,7 +1395,13 @@ fn safe_join(dest: &Path, name: &str) -> Option<PathBuf> {
 /// the BCJ2 filter that the Rust decoder does not implement; when it refuses,
 /// the system's libarchive (`tar`, which reads 7z with BCJ2 on Windows 10+ and
 /// on Linux) finishes the job without progress.
-pub fn extract(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<(), String> {
+///
+/// Returns the files the unpacker reported as damaged (a CRC mismatch inside
+/// the archive). 7-Zip and libarchive still write every file when that
+/// happens, and the game often runs anyway (a checksum wrong in the archive's
+/// own header, a byte off in an asset), so that is a warning, not a failure.
+/// Any other error (no space, no permission, not an archive) still fails.
+pub fn extract(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("Cannot create {}: {e}", dest.display()))?;
     let is_7z = archive
         .extension()
@@ -1312,7 +1409,7 @@ pub fn extract(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>))
         .unwrap_or(false);
     if is_7z {
         match extract_7z(archive, dest, progress) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(Vec::new()),
             Err(e) => {
                 progress(0, None);
                 return extract_with_tar(archive, dest).map_err(|t| format!("{e}; {t}"));
@@ -1321,6 +1418,40 @@ pub fn extract(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>))
     }
     progress(0, None);
     extract_with_tar(archive, dest)
+}
+
+/// The files an unpacker's error output says are damaged, when damage is ALL
+/// it reports. `None` when anything else went wrong.
+///
+/// libarchive (Windows' tar.exe, bsdtar): `Game.pck: 7-Zip bad CRC 0x... should
+/// be 0x...` then `Error exit delayed from previous errors.` 7-Zip: `ERROR: CRC
+/// Failed : Game.pck` or `ERROR: Data Error : Game.pck`, plus its summary lines.
+fn damaged_files(stderr: &str) -> Option<Vec<String>> {
+    let mut damaged = Vec::new();
+    for line in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let lower = line.to_ascii_lowercase();
+        if let Some(at) = lower.find(": 7-zip bad crc").or_else(|| lower.find(": bad crc")) {
+            damaged.push(line[..at].trim().to_string());
+        } else if let Some(rest) = ["error: crc failed", "error: data error", "crc failed", "data error"]
+            .iter()
+            .find_map(|p| lower.strip_prefix(p).map(|r| r.len()))
+        {
+            let name = line[line.len() - rest..].trim().trim_start_matches(':').trim();
+            let name = name.strip_suffix("wrong password?").unwrap_or(name).trim().trim_end_matches(". ").to_string();
+            if !name.is_empty() {
+                damaged.push(name);
+            }
+        } else if lower.contains("error exit delayed from previous errors")
+            || lower.starts_with("sub items errors")
+            || lower.starts_with("archives with errors")
+            || lower.starts_with("errors:")
+        {
+            // A summary of the lines above.
+        } else {
+            return None;
+        }
+    }
+    (!damaged.is_empty()).then_some(damaged)
 }
 
 fn extract_7z(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<(), String> {
@@ -1367,7 +1498,7 @@ fn extract_7z(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) 
     Ok(())
 }
 
-fn extract_with_tar(archive: &Path, dest: &Path) -> Result<(), String> {
+fn extract_with_tar(archive: &Path, dest: &Path) -> Result<Vec<String>, String> {
     #[cfg(windows)]
     let candidates: Vec<(PathBuf, Vec<String>)> = {
         let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
@@ -1397,8 +1528,24 @@ fn extract_with_tar(archive: &Path, dest: &Path) -> Result<(), String> {
             cmd.creation_flags(0x0800_0000);
         }
         match cmd.output() {
-            Ok(out) if out.status.success() => return Ok(()),
-            Ok(out) => last_error = String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            Ok(out) if out.status.success() => return Ok(Vec::new()),
+            Ok(out) => {
+                // 7-Zip prints its errors to stdout, libarchive to stderr.
+                let text = format!("{}\n{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+                let errors: String = text
+                    .lines()
+                    .filter(|l| {
+                        let l = l.to_ascii_lowercase();
+                        style.is_empty() || l.contains("error") || l.contains("crc")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let wrote_something = std::fs::read_dir(dest).map(|mut d| d.next().is_some()).unwrap_or(false);
+                if let Some(damaged) = damaged_files(&errors).filter(|_| wrote_something) {
+                    return Ok(damaged);
+                }
+                last_error = errors.trim().to_string();
+            }
             Err(e) => last_error = e.to_string(),
         }
     }
@@ -1538,7 +1685,9 @@ mod tests {
     fn ranges_cover_the_file_exactly() {
         let total = 2_458_559_531u64;
         let segs = split(total, 8);
-        assert_eq!(segs.len(), 8);
+        // Four ranges per connection, so a connection that finishes early has
+        // more to take.
+        assert_eq!(segs.len(), 32);
         assert_eq!(segs[0].start, 0);
         assert_eq!(segs.last().unwrap().end, total - 1);
         for w in segs.windows(2) {
@@ -1730,5 +1879,97 @@ mod tests {
         assert!(root.join(&exe).is_file());
         assert_eq!(std::fs::read(root.join("Data/level.bin")).unwrap().len(), 300_000);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn checksum_errors_alone_are_a_warning() {
+        let tar = "UntilThen.pck: 7-Zip bad CRC 0xe05db56a should be 0x1fbc7295: Unknown error\ntar.exe: Error exit delayed from previous errors.";
+        assert_eq!(damaged_files(tar), Some(vec!["UntilThen.pck".to_string()]));
+        let seven = "ERROR: CRC Failed : data/UntilThen.pck\nSub items Errors: 1\nArchives with Errors: 1";
+        assert_eq!(damaged_files(seven), Some(vec!["data/UntilThen.pck".to_string()]));
+        // Anything else is a real failure.
+        assert_eq!(damaged_files("Game.pck: Write failed: No space left on device\ntar.exe: Error exit delayed from previous errors."), None);
+        assert_eq!(damaged_files("tar.exe: Error opening archive: Unrecognized archive format"), None);
+        assert!(damage_warning(&["a.pck".into(), "b.pck".into()], true).unwrap().contains("a.pck and 1 more"));
+    }
+
+    /// Throughput of the range fetcher against a local server that sends as
+    /// fast as it can: what the client itself costs, with no network in the
+    /// way. `cargo test --release -- --ignored range_throughput --nocapture`
+    #[test]
+    #[ignore]
+    fn range_throughput() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            const TOTAL: u64 = 1024 * 1024 * 1024;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else { return };
+                    tokio::spawn(async move {
+                        loop {
+                            let mut req = Vec::new();
+                            let mut b = [0u8; 1024];
+                            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                                let Ok(n) = sock.read(&mut b).await else { return };
+                                if n == 0 {
+                                    return;
+                                }
+                                req.extend_from_slice(&b[..n]);
+                            }
+                            let text = String::from_utf8_lossy(&req).to_string();
+                            let range = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(String::from)).unwrap();
+                            let (a, z) = range.trim().split_once('-').unwrap();
+                            let (a, z): (u64, u64) = (a.parse().unwrap(), z.parse().unwrap());
+                            let len = z - a + 1;
+                            let head = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {len}\r\nContent-Range: bytes {a}-{z}/{TOTAL}\r\n\r\n");
+                            if sock.write_all(head.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            let block = vec![7u8; 256 * 1024];
+                            let mut left = len;
+                            while left > 0 {
+                                let n = left.min(block.len() as u64) as usize;
+                                if sock.write_all(&block[..n]).await.is_err() {
+                                    return;
+                                }
+                                left -= n as u64;
+                            }
+                        }
+                    });
+                }
+            });
+            let path = scratch("bench").join("file.bin");
+            std::fs::File::create(&path).unwrap().set_len(TOTAL).unwrap();
+            let client = reqwest::Client::builder().tcp_nodelay(true).build().unwrap();
+            let url = format!("http://{addr}/file");
+            for conns in [8u32, 16] {
+                let segs = Arc::new(split(TOTAL, conns));
+                let progress: Arc<Vec<AtomicU64>> = Arc::new(segs.iter().map(|_| AtomicU64::new(0)).collect());
+                let (stop, limiter, next) = (Arc::new(AtomicU8::new(RUN)), Arc::new(Limiter::new(0)), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+                let t = Instant::now();
+                let mut tasks = Vec::new();
+                for _ in 0..conns {
+                    let (client, url, path, progress, stop, limiter, segs, next) =
+                        (client.clone(), url.clone(), path.clone(), progress.clone(), stop.clone(), limiter.clone(), segs.clone(), next.clone());
+                    tasks.push(tokio::spawn(async move {
+                        loop {
+                            let i = next.fetch_add(1, Ordering::SeqCst);
+                            let Some(seg) = segs.get(i) else { break };
+                            assert!(fetch_range(&client, &url, &path, i, seg.clone(), &progress, &stop, &limiter).await.is_ok());
+                        }
+                    }));
+                }
+                for t in tasks {
+                    t.await.unwrap();
+                }
+                let secs = t.elapsed().as_secs_f64();
+                let got: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
+                assert_eq!(got, TOTAL);
+                println!("{conns} connections: {:.0} MB/s", TOTAL as f64 / 1048576.0 / secs);
+            }
+        });
     }
 }

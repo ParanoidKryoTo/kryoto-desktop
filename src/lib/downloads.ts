@@ -35,10 +35,14 @@ export type Download = {
   verified: boolean
   /** Set when the file is one of the game's add-ons: its name. */
   addon: string | null
+  /** Installed, but the unpacker reported damaged files: what to tell the player. */
+  warning?: string | null
   meta: {
     title: string
     cover: string | null
     hero: string | null
+    logo?: string | null
+    header?: string | null
     executable: string
     entries: LaunchEntry[]
     source: string | null

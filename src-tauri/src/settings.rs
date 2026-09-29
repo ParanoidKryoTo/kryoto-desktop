@@ -57,6 +57,12 @@ pub struct Settings {
     pub linux_gamemode: bool,
     /// Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions.
     pub linux_fsr: bool,
+    /// Settings written before 0.3 had 8 connections as the default. The first
+    /// load after that moves an untouched 8 to the new default of 16, once.
+    /// Missing from an old file reads as false (the field's own default, not
+    /// the struct's).
+    #[serde(default)]
+    pub connections_v2: bool,
 }
 
 impl Default for Settings {
@@ -79,12 +85,13 @@ impl Default for Settings {
             start_with_system: false,
             press_effect: true,
             share_playtime: true,
-            connections: 8,
+            connections: 16,
             speed_limit_mb: 0,
             catalog_endpoint: String::new(),
             linux_mangohud: false,
             linux_gamemode: false,
             linux_fsr: false,
+            connections_v2: true,
         }
     }
 }
@@ -196,6 +203,13 @@ fn read<R: Runtime>(app: &AppHandle<R>) -> Settings {
         let home = app.path().home_dir().unwrap_or_else(|_| PathBuf::from("."));
         s.library_dir = home.join("Kryoto Games").to_string_lossy().into_owned();
     }
+    if !s.connections_v2 {
+        if s.connections == 8 {
+            s.connections = 16;
+        }
+        s.connections_v2 = true;
+        let _ = write(app, &s);
+    }
     s
 }
 
@@ -210,6 +224,8 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
         return Err("Pick a folder for the library.".into());
     }
     settings.catalog_endpoint = normalize_catalog_endpoint(&settings.catalog_endpoint)?;
+    // A choice made in Settings is the player's, never migrated again.
+    settings.connections_v2 = true;
     std::fs::create_dir_all(&settings.library_dir)
         .map_err(|e| format!("Cannot use {}: {e}", settings.library_dir))?;
     let before = load(&app);
@@ -229,6 +245,14 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
 #[cfg(test)]
 mod tests {
     use super::{catalog_endpoint, is_catalog_origin, normalize_catalog_endpoint, Settings, DEFAULT_CATALOG_ENDPOINT};
+
+    #[test]
+    fn an_old_file_is_moved_to_the_new_connection_default_once() {
+        let old: Settings = serde_json::from_str(r#"{"connections":8}"#).unwrap();
+        assert!(!old.connections_v2);
+        let new: Settings = serde_json::from_str(r#"{"connections":8,"connectionsV2":true}"#).unwrap();
+        assert!(new.connections_v2);
+    }
 
     #[test]
     fn custom_endpoint_is_a_safe_origin() {

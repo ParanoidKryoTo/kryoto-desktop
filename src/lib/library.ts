@@ -24,6 +24,10 @@ export type LibraryGame = {
   slug: string | null
   cover: string | null
   hero: string | null
+  /** The transparent title logo, when Steam has one. */
+  logo?: string | null
+  /** The wide store header, for rows and cards. */
+  header?: string | null
   installDir: string
   executable: string
   defaultArgs: string
@@ -127,6 +131,9 @@ export type CatalogGame = {
   title: string
   cover: string | null
   hero: string | null
+  logo: string | null
+  header: string | null
+  screenshots: string[]
   executable: string
   defaultArgs: string
   entries: LaunchEntry[]
@@ -155,7 +162,8 @@ export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
   const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}`))
   if (res.status === 404) throw new Error(`kryo.to has no game at /game/${slug}.`)
   if (!res.ok) throw new Error(`kryo.to answered ${res.status}.`)
-  const { game } = (await res.json()) as { game: Record<string, unknown> }
+  const { game, art } = (await res.json()) as { game: Record<string, unknown>; art?: Record<string, unknown> }
+  const artUrl = (k: string) => (typeof art?.[k] === 'string' && (art[k] as string).trim() ? (art[k] as string).trim() : null)
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null)
   const available = (game.game_launch_options as { available?: LaunchEntry[] } | null)?.available
   // A Steam branch listed as its own game carries a suffix (GoreBox's
@@ -164,10 +172,16 @@ export async function fetchCatalogGame(slug: string): Promise<CatalogGame> {
   return {
     slug,
     title: str(game.title) ?? slug,
-    cover: str(game.cover_vertical) ?? str(game.cover),
+    // `art` is what kryo.to resolved from Steam (real, hashed URLs); the
+    // legacy appid paths are only a last guess, and they 404 for new games.
+    cover: artUrl('capsule') ?? str(game.cover_vertical) ?? str(game.cover),
     hero:
+      artUrl('hero') ??
       str(game.hero_image_override) ??
       (appid ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${appid}/library_hero.jpg` : str(game.cover_horizontal)),
+    logo: artUrl('logo'),
+    header: artUrl('header') ?? str(game.cover_horizontal) ?? str(game.cover),
+    screenshots: Array.isArray(art?.screenshots) ? (art.screenshots as unknown[]).filter((u): u is string => typeof u === 'string') : [],
     executable: str(game.game_executable_path) ?? '',
     defaultArgs: str(game.game_executable_args) ?? '',
     entries: Array.isArray(available) ? available.filter(isWindowsEntry) : [],
@@ -186,9 +200,14 @@ export function logoFor(game: LibraryGame): string | null {
 }
 
 /** Steam's landscape capsule, for the recent-games shelf. */
-export function capsuleFor(game: LibraryGame): string | null {
+/**
+ * The wide picture for a row or card, best first: the store header kryo.to
+ * resolved, then the legacy Steam path (a guess that 404s for newer games),
+ * then the cover.
+ */
+export function capsulesFor(game: { hero?: string | null; cover: string | null; header?: string | null }): (string | null)[] {
   const m = (game.hero ?? game.cover ?? '').match(/\/apps\/(\d+)\//)
-  return m ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${m[1]}/header.jpg` : game.cover
+  return [game.header ?? null, m ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${m[1]}/header.jpg` : null, game.cover]
 }
 
 /* ── Launch entries ──────────────────────────────────────── */
