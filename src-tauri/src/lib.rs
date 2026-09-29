@@ -10,6 +10,7 @@ mod linux_overlay;
 mod logging;
 mod menus;
 mod online;
+mod resolvers;
 mod settings;
 mod storage;
 mod system;
@@ -152,6 +153,53 @@ fn merge_download_context(
         }
     }
     (slug.or(page_slug), title)
+}
+
+/// The game whose page the Store is on, when `url` is a mirror Kryoto can
+/// download from. Anywhere else the link opens like any other.
+fn mirror_on_game_page<R: Runtime>(app: &tauri::AppHandle<R>, url: &url::Url) -> Option<String> {
+    resolvers::classify(url.as_str())?;
+    let page = app.get_webview(STORE)?.url().ok()?;
+    game_slug(&page, &settings::load(app))
+}
+
+/// Download a game from one of its mirrors (the Library's download options
+/// and Versions). `release` is the version string when it is not the current
+/// release.
+#[tauri::command]
+fn download_mirror(
+    app: tauri::AppHandle,
+    url: String,
+    slug: String,
+    title: Option<String>,
+    release: Option<String>,
+) -> Result<(), String> {
+    downloads::enqueue_mirror(&app, url, Some(slug), title, release)
+}
+
+#[derive(serde::Serialize)]
+struct MirrorHost {
+    host: &'static str,
+    /// `api` and `direct` download straight away; `page` opens the host's
+    /// page in a window of its own and may ask for a check.
+    kind: &'static str,
+}
+
+/// Which of these links Kryoto can download from itself.
+#[tauri::command]
+fn mirror_hosts(urls: Vec<String>) -> Vec<Option<MirrorHost>> {
+    urls.iter()
+        .map(|u| {
+            resolvers::classify(u).map(|(kind, host)| MirrorHost {
+                host,
+                kind: match kind {
+                    resolvers::Kind::Api => "api",
+                    resolvers::Kind::Direct => "direct",
+                    resolvers::Kind::Page => "page",
+                },
+            })
+        })
+        .collect()
 }
 
 /// Only plain web navigation stays inside the web view. Everything else
@@ -527,6 +575,12 @@ async fn store_mount(
             if is_kryoto(&url, &popup_app) {
                 if let Some(view) = popup_app.get_webview(STORE) {
                     let _ = view.navigate(url);
+                }
+            } else if let Some(slug) = mirror_on_game_page(&popup_app, &url) {
+                // A mirror pressed on a game's page downloads here, from
+                // that mirror, instead of in a browser.
+                if let Err(e) = downloads::enqueue_mirror(&popup_app, url.to_string(), Some(slug), None, None) {
+                    let _ = popup_app.emit("notify", downloads::Notice::new("Can't use that mirror", &e, None));
                 }
             } else if allowed_browser_url(&url) {
                 let _ = open_external_url(url.as_str());
@@ -1012,6 +1066,8 @@ pub fn run() {
             downloads::download_resume,
             downloads::download_cancel,
             downloads::download_remove,
+            download_mirror,
+            mirror_hosts,
             compat::compat_tools,
             compat::compat_status,
             compat::compat_install,

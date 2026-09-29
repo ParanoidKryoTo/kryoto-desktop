@@ -44,6 +44,8 @@ commands.allow = [
   "download_resume",
   "download_cancel",
   "download_remove",
+  "download_mirror",
+  "mirror_hosts",
   "compat_tools",
   "compat_status",
   "compat_install",

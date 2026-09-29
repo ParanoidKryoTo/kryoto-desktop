@@ -101,7 +101,9 @@ export function GamePage({
   }, [game, previewEntry])
 
   const choice = hasChoice(game)
-  const updateAvailable = !!latest && !!game.version && latest !== game.version
+  // A build kept under Properties > Builds is not offered updates.
+  const kept = !!game.pinnedVersion && game.pinnedVersion === game.version
+  const updateAvailable = !!latest && !!game.version && latest !== game.version && !kept
 
   return (
     <section aria-label={game.title} className="min-h-0 grow overflow-auto">
@@ -307,7 +309,9 @@ export function GamePage({
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
             {game.developer ? <Fact k="Developer" v={game.developer} /> : null}
             {game.source ? <Fact k="Release" v={game.source} /> : null}
-            {game.version ? <Fact k="Build" v={game.version} /> : null}
+            {game.version ? (
+              <Fact k="Build" v={kept ? `${game.version}, kept${latest && latest !== game.version ? ` (current is ${latest})` : ''}` : game.version} />
+            ) : null}
             <Fact k="Folder" v={game.installDir} mono />
             {game.launchOptions ? <Fact k="Options" v={game.launchOptions} mono /> : null}
           </dl>

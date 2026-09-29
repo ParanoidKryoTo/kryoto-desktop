@@ -50,6 +50,10 @@ pub struct LibraryGame {
     /// The kryo.to release version installed, when it came from a download -
     /// what "Update available" compares against.
     pub version: Option<String>,
+    /// A build picked under Versions rather than the current one: while it is
+    /// the one installed, no update is offered. Like choosing a branch in
+    /// Steam's Betas.
+    pub pinned_version: Option<String>,
     /// A few words from kryo.to for the game page.
     pub short: Option<String>,
     pub developer: Option<String>,
@@ -190,6 +194,9 @@ pub fn upsert_installed<R: Runtime>(app: &AppHandle<R>, mut game: LibraryGame) -
                 slot.entries = game.entries.clone();
                 slot.source = game.source.clone();
                 slot.version = game.version.clone();
+                slot.pinned_version = game.pinned_version.clone();
+                slot.logo = game.logo.clone().or(slot.logo.take());
+                slot.header = game.header.clone().or(slot.header.take());
                 slot.cover = game.cover.clone().or(slot.cover.take());
                 slot.hero = game.hero.clone().or(slot.hero.take());
                 slot.short = game.short.clone().or(slot.short.take());

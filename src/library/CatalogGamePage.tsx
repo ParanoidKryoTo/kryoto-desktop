@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, Download, Globe } from 'lucide-react'
-import { AsciiBar, Button, Caption, Card, IconButton, Label, MenuList, useDismiss } from '@/ui'
+import { ChevronDown, Globe, Layers } from 'lucide-react'
+import { AsciiBar, Button, Caption, Card, IconButton, Label, MenuList, Modal, useDismiss } from '@/ui'
 import { fetchCatalogGame, type CatalogGame } from '@/lib/library'
 import { isActive, phaseOf, progressOf, type Download as DownloadItem } from '@/lib/downloads'
 import { errorText } from '@/lib/bridge'
 import { GameBanner } from '@/library/Art'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
+import { InstallButton, VersionsList, type GetOurs } from '@/library/Versions'
 
 /**
  * A kryo.to game that is on one of your lists but not on this PC, opened in
@@ -32,13 +33,16 @@ export function CatalogGamePage({
   download: DownloadItem | null
   savedStatus: SavedStatus | null
   onSetStatus: (status: SavedStatus | null) => void
-  onInstall: () => void
+  /** Our own copy, through the Store's sheet; `releaseId` for a build other than the current one. */
+  onInstall: GetOurs
   onStorePage: () => void
   onDownloads: () => void
 }) {
   const [game, setGame] = useState<CatalogGame | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [statusOpen, setStatusOpen] = useState(false)
+  const [versions, setVersions] = useState(false)
+  const [installError, setInstallError] = useState<string | null>(null)
   const statusRef = useRef<HTMLDivElement | null>(null)
   useDismiss(statusOpen, statusRef, () => setStatusOpen(false))
 
@@ -82,10 +86,14 @@ export function CatalogGamePage({
             </span>
           </button>
         ) : (
-          <Button variant="primary" size="lg" onClick={onInstall} disabled={!game && !error}>
-            <Download className="size-4" />
-            Install
-          </Button>
+          <InstallButton
+            slug={slug}
+            title={title}
+            onOurs={onInstall}
+            onError={setInstallError}
+            onVersions={() => setVersions(true)}
+            disabled={!game && !error}
+          />
         )}
 
         <div ref={statusRef} className="relative">
@@ -121,11 +129,34 @@ export function CatalogGamePage({
         </div>
 
         <div className="ml-auto flex gap-2">
+          <IconButton label="Builds" onClick={() => setVersions(true)}>
+            <Layers className="size-4" />
+          </IconButton>
           <IconButton label="Store page" onClick={onStorePage}>
             <Globe className="size-4" />
           </IconButton>
         </div>
       </div>
+
+      {installError ? (
+        <p className="kryo-radius mx-6 mt-3 border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">{installError}</p>
+      ) : null}
+      {versions ? (
+        <Modal title={`${title}: builds`} onClose={() => setVersions(false)}>
+          <VersionsList
+            slug={slug}
+            title={title}
+            installed={null}
+            pinned={null}
+            onOurs={(id) => {
+              setVersions(false)
+              onInstall(id)
+            }}
+            onError={setInstallError}
+            onStarted={() => setVersions(false)}
+          />
+        </Modal>
+      ) : null}
 
       <div className="grid grid-cols-[minmax(0,1fr)_320px] items-start gap-4 p-6">
         <Card>

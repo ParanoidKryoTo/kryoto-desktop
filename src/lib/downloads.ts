@@ -5,6 +5,7 @@ import type { LaunchEntry } from '@/lib/library'
 /** Mirrors `src-tauri/src/downloads.rs`. */
 export type DownloadStatus =
   | 'queued'
+  | 'resolving'
   | 'downloading'
   | 'paused'
   | 'verifying'
@@ -37,6 +38,10 @@ export type Download = {
   addon: string | null
   /** Installed, but the unpacker reported damaged files: what to tell the player. */
   warning?: string | null
+  /** From a mirror rather than our own copy. */
+  mirror?: { page: string; host: string } | null
+  /** A build other than the current one, picked under Versions. */
+  release?: string | null
   meta: {
     title: string
     cover: string | null
@@ -60,13 +65,17 @@ export const downloads = {
   resume: (id: string) => call<void>('download_resume', { id }),
   cancel: (id: string) => call<void>('download_cancel', { id }),
   remove: (id: string) => call<void>('download_remove', { id }),
+  /** Download a game from one of its mirrors. `release` names a build other than the current one. */
+  mirror: (url: string, slug: string, title: string | null, release: string | null) =>
+    call<void>('download_mirror', { url, slug, title, release }),
 }
 
 export const isActive = (d: Download) =>
-  d.status === 'downloading' || d.status === 'verifying' || d.status === 'extracting' || d.status === 'queued'
+  d.status === 'downloading' || d.status === 'verifying' || d.status === 'extracting' || d.status === 'queued' || d.status === 'resolving'
 
-/** The one moving now: fetching, checking or unpacking. */
-export const isWorking = (d: Download) => d.status === 'downloading' || d.status === 'verifying' || d.status === 'extracting'
+/** The one moving now: asking its mirror, fetching, checking or unpacking. */
+export const isWorking = (d: Download) =>
+  d.status === 'resolving' || d.status === 'downloading' || d.status === 'verifying' || d.status === 'extracting'
 
 /** Overall progress 0..1: downloading to 85%, checking to 90%, unpacking the rest. */
 export function progressOf(d: Download): number {
@@ -79,6 +88,7 @@ export function progressOf(d: Download): number {
 
 /** What the download is doing, in one word, for labels. */
 export function phaseOf(d: Download): string {
+  if (d.status === 'resolving') return d.mirror ? `Asking ${d.mirror.host}` : 'Starting'
   if (d.status === 'verifying') return 'Checking'
   if (d.status === 'extracting') return d.addon ? 'Applying' : 'Installing'
   return 'Downloading'

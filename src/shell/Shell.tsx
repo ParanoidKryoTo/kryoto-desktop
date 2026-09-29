@@ -10,6 +10,7 @@ import {
   Square,
   Trash2,
   User,
+  Layers,
 } from 'lucide-react'
 import { Button, Check, ContextMenu, Modal, type MenuEntry } from '@/ui'
 import { KryoMorph } from '@/ui/ascii/KryoMorph'
@@ -53,7 +54,7 @@ type Browser = ReturnType<typeof useBrowserPage>
 type Overlay =
   | { kind: 'add'; slug: string | null }
   | { kind: 'choose'; id: string }
-  | { kind: 'props'; id: string }
+  | { kind: 'props'; id: string; tab?: 'versions' }
   | { kind: 'uninstall'; id: string }
   | { kind: 'about' }
 
@@ -358,6 +359,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
 
   const manageMenu = (g: LibraryGame): MenuEntry[] => [
     { label: 'Properties', icon: <SettingsIcon />, onSelect: () => setOverlay({ kind: 'props', id: g.id }) },
+    ...(g.slug ? [{ label: 'Builds', icon: <Layers />, onSelect: () => setOverlay({ kind: 'props', id: g.id, tab: 'versions' }) }] : []),
     {
       label: 'Browse local files',
       icon: <FolderOpen />,
@@ -632,7 +634,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
             download={dl.find((d) => d.slug === catalogSlug) ?? null}
             savedStatus={saved.find((e) => e.slug === catalogSlug)?.status ?? null}
             onSetStatus={(st) => void setSavedStatus(catalogSlug, st).catch((e) => lib.setError(errorText(e)))}
-            onInstall={() => openWeb(`/game/${catalogSlug}?download=1`)}
+            onInstall={(release) => openWeb(`/game/${catalogSlug}?download=1${release ? `&release=${encodeURIComponent(release)}` : ''}`)}
             onStorePage={() => openWeb(`/game/${catalogSlug}`)}
             onDownloads={() => go({ kind: 'downloads' })}
           />
@@ -762,12 +764,16 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       {overlay?.kind === 'props' && overlayGame ? (
         <GameProperties
           game={overlayGame}
+          startTab={overlay.tab}
           onClose={() => setOverlay(null)}
           onSaved={(game) => {
             lib.upsert(game)
             setOverlay(null)
           }}
           onUninstall={() => setOverlay({ kind: 'uninstall', id: overlayGame.id })}
+          onOurs={(release) =>
+            overlayGame.slug && openWeb(`/game/${overlayGame.slug}?download=1${release ? `&release=${encodeURIComponent(release)}` : ''}`)
+          }
         />
       ) : null}
       {overlay?.kind === 'uninstall' && overlayGame ? (

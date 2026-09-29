@@ -29,6 +29,8 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 pub enum Status {
     #[default]
     Queued,
+    /// Asking a mirror for its file (see `resolvers`).
+    Resolving,
     Downloading,
     Paused,
     /// Checking the archive against the SHA-256 kryo.to lists for it.
@@ -96,6 +98,21 @@ pub struct Download {
     /// Installed, but the unpacker reported damaged files (a CRC mismatch
     /// inside the archive). Games often run anyway; this says which files.
     pub warning: Option<String>,
+    /// Set when this comes from a mirror rather than kryo.to's own copy: the
+    /// mirror's page, resolved again whenever the file's address runs out.
+    pub mirror: Option<Mirror>,
+    /// The release picked under a game's Versions, when it is not the
+    /// current one: its version string, recorded on the installed game.
+    pub release: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Mirror {
+    /// The mirror's own link, as kryo.to lists it.
+    pub page: String,
+    /// The host's name, for the list ("Pixeldrain").
+    pub host: String,
 }
 
 /// One byte range of a download, on a connection of its own.
@@ -173,6 +190,9 @@ pub struct Downloads {
     /// One transfer at a time.
     slot: tokio::sync::Semaphore,
     last_emit: Mutex<Option<Instant>>,
+    /// What each mirror download resolved to. Not saved: cookies and signed
+    /// addresses go stale, so a download resumed after a restart asks again.
+    resolved: Mutex<HashMap<String, crate::resolvers::Resolved>>,
 }
 
 impl Downloads {
@@ -182,6 +202,7 @@ impl Downloads {
             controls: Mutex::new(HashMap::new()),
             slot: tokio::sync::Semaphore::new(1),
             last_emit: Mutex::new(None),
+            resolved: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -275,7 +296,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
     for d in &mut list {
-        if matches!(d.status, Status::Queued | Status::Downloading | Status::Verifying | Status::Extracting) {
+        if matches!(d.status, Status::Queued | Status::Resolving | Status::Downloading | Status::Verifying | Status::Extracting) {
             d.status = Status::Paused;
             d.speed = 0;
         }
@@ -364,13 +385,38 @@ fn base64url(text: &str) -> Option<Vec<u8>> {
 
 /// Queue a download the Store handed over. `slug` is the game page it came from.
 pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>, title: Option<String>) {
+    enqueue_item(app, url, slug, title, None, None)
+}
+
+/// Queue a download from one of a game's mirrors: resolved to its file when
+/// its turn comes (`resolvers`), then fetched and installed like any other.
+pub fn enqueue_mirror<R: Runtime>(
+    app: &AppHandle<R>,
+    page: String,
+    slug: Option<String>,
+    title: Option<String>,
+    release: Option<String>,
+) -> Result<(), String> {
+    let (_, host) = crate::resolvers::classify(&page).ok_or("Kryoto can't download from that host yet. Open it in your browser instead.")?;
+    enqueue_item(app, page.clone(), slug, title, Some(Mirror { page, host: host.into() }), release);
+    Ok(())
+}
+
+fn enqueue_item<R: Runtime>(
+    app: &AppHandle<R>,
+    url: String,
+    slug: Option<String>,
+    title: Option<String>,
+    mirror: Option<Mirror>,
+    release: Option<String>,
+) {
     let state = app.state::<Downloads>();
     // The same page's Download pressed twice while the first is still going.
     if let Ok(list) = state.list.lock() {
         if list.iter().any(|d| {
             d.slug.is_some()
                 && d.slug == slug
-                && matches!(d.status, Status::Queued | Status::Downloading | Status::Verifying | Status::Extracting)
+                && matches!(d.status, Status::Queued | Status::Resolving | Status::Downloading | Status::Verifying | Status::Extracting)
         }) {
             let _ = app.emit("notify", Notice::new("Already downloading", "That game is already in Downloads.", None));
             return;
@@ -392,6 +438,8 @@ pub fn enqueue<R: Runtime>(app: &AppHandle<R>, url: String, slug: Option<String>
         slug,
         url,
         added_at: now(),
+        mirror,
+        release,
         ..Default::default()
     };
     if let Ok(mut list) = state.list.lock() {
@@ -626,11 +674,18 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
         if let Some(slug) = &item.slug {
             if let Some(meta) = fetch_meta(&client, &endpoint, slug).await {
                 edit(app, id, |d| {
-                    d.total = d.total.or(meta.size_bytes);
+                    // The current release's size says nothing about another's.
+                    if d.release.is_none() {
+                        d.total = d.total.or(meta.size_bytes);
+                    }
                     let named = std::mem::take(&mut d.meta.title);
                     d.meta = meta;
                     if d.meta.title.trim().is_empty() {
                         d.meta.title = named;
+                    }
+                    if let Some(v) = d.release.clone() {
+                        d.meta.version = Some(v);
+                        d.meta.size_bytes = None;
                     }
                 });
                 emit(app, true);
@@ -650,12 +705,22 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
         !d.archive_path.is_empty() && d.total.is_some_and(|t| t > 0 && d.received >= t)
     };
     if !already_complete {
+        let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
+        let (mut client, mut connections) = (client.clone(), settings.connections);
+        if is_mirror {
+            match mirror_client(app, id, flag, false, settings.connections).await {
+                Ok(v) => (client, connections) = v,
+                Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
+                Err(e) => return Err(e),
+            }
+        }
         set_status(app, id, Status::Downloading, None);
         let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
         let mut attempt = 0;
+        let mut asked_again = false;
         loop {
-            let step = if settings.connections > 1 {
-                transfer_parallel(app, id, flag, &client, &settings.library_dir, settings.connections, &limiter).await
+            let step = if connections > 1 {
+                transfer_parallel(app, id, flag, &client, &settings.library_dir, connections, &limiter).await
             } else {
                 transfer(app, id, flag, &client, &settings.library_dir).await
             };
@@ -663,6 +728,18 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
                 Ok(true) => break,
                 Ok(false) => return settle_stopped(app, id, flag),
                 Err(Transfer::Fatal(e)) => return Err(e),
+                // A mirror's address ran out (they are signed, or tied to a
+                // session): ask the mirror again, once per run.
+                Err(Transfer::Refused(_)) if is_mirror && !asked_again => {
+                    asked_again = true;
+                    match mirror_client(app, id, flag, true, settings.connections).await {
+                        Ok(v) => (client, connections) = v,
+                        Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
+                        Err(e) => return Err(e),
+                    }
+                    set_status(app, id, Status::Downloading, None);
+                }
+                Err(Transfer::Refused(code)) => return Err(refused_text(code, is_mirror)),
                 Err(Transfer::Retry(e)) => {
                     attempt += 1;
                     if attempt > 4 {
@@ -704,18 +781,33 @@ async fn identify<R: Runtime>(app: &AppHandle<R>, id: &str, client: &reqwest::Cl
     }
     let Ok(res) = client.get(format!("{base}/api/games/{slug}/downloads")).send().await else { return };
     let Ok(json) = res.json::<serde_json::Value>().await else { return };
-    let (sha, addon) = match_file(&json, &d.file_name);
+    let found = match_file(&json, &d.file_name);
     edit(app, id, |d| {
-        if sha.is_some() {
-            d.sha256 = sha;
+        if found.sha.is_some() {
+            d.sha256 = found.sha;
         }
-        d.addon = addon;
+        d.addon = found.addon;
+        // A build other than the current one, whichever way it was picked:
+        // it installs as that build.
+        if let Some(v) = found.release {
+            d.meta.version = Some(v.clone());
+            d.release = Some(v);
+        }
     });
 }
 
 /// The SHA-256 and (for an add-on) the name of `file` in a
 /// `/api/games/<slug>/downloads` answer.
-pub fn match_file(json: &serde_json::Value, file: &str) -> (Option<String>, Option<String>) {
+#[derive(Debug, Default, PartialEq)]
+pub struct FileMatch {
+    pub sha: Option<String>,
+    /// The add-on's name, when the file is one.
+    pub addon: Option<String>,
+    /// The release's version, when the file is a release other than the current one.
+    pub release: Option<String>,
+}
+
+pub fn match_file(json: &serde_json::Value, file: &str) -> FileMatch {
     let same = |name: &str| safe_name(name).eq_ignore_ascii_case(file);
     let hash_in = |v: &serde_json::Value| {
         v["hashes"].as_array().and_then(|hs| {
@@ -727,17 +819,28 @@ pub fn match_file(json: &serde_json::Value, file: &str) -> (Option<String>, Opti
         })
     };
     if let Some(sha) = hash_in(json) {
-        return (Some(sha), None);
+        return FileMatch { sha: Some(sha), ..Default::default() };
+    }
+    // Another release (an older build, picked under Versions).
+    for release in json["releases"].as_array().into_iter().flatten() {
+        if let Some(sha) = hash_in(release) {
+            let other = !release["primary"].as_bool().unwrap_or(false);
+            return FileMatch {
+                sha: Some(sha),
+                release: other.then(|| release["version"].as_str().map(str::to_string)).flatten(),
+                ..Default::default()
+            };
+        }
     }
     for addon in json["addons"].as_array().into_iter().flatten() {
         let named = addon["links"].as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(same));
         let hash = hash_in(addon);
         if named || hash.is_some() {
             let label = addon["label"].as_str().filter(|l| !l.trim().is_empty()).unwrap_or("Add-on").to_string();
-            return (hash, Some(label));
+            return FileMatch { sha: hash, addon: Some(label), release: None };
         }
     }
-    (None, None)
+    FileMatch::default()
 }
 
 /// Check the archive against the SHA-256 kryo.to lists for it. A mismatch
@@ -817,6 +920,86 @@ fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> 
 enum Transfer {
     Retry(String),
     Fatal(String),
+    /// The server turned the address down (403, 410): it expired, or is
+    /// bound to something this request is not.
+    Refused(u16),
+}
+
+/// What a refused address means, for the person.
+fn refused_text(code: u16, mirror: bool) -> String {
+    match (mirror, code) {
+        (true, _) => format!("The mirror refused the download twice (it answered {code}). Try another mirror, or our own copy."),
+        (false, 410) => "The download link expired. Open the game in the Store and press Download again.".into(),
+        (false, _) => {
+            "kryo.to refused the link - it only works on the network it was made for. Press Download again in the Store.".into()
+        }
+    }
+}
+
+/// Resolve a mirror download (again, with `fresh`) and build the client its
+/// file wants: the mirror's cookies, user agent and referer on every request,
+/// and no more connections than the host puts up with.
+async fn mirror_client<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    flag: &AtomicU8,
+    fresh: bool,
+    connections: u32,
+) -> Result<(reqwest::Client, u32), String> {
+    let state = app.state::<Downloads>();
+    let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+    let mirror = d.mirror.clone().ok_or("Not a mirror download.")?;
+    let known = if fresh { None } else { state.resolved.lock().ok().and_then(|r| r.get(id).cloned()) };
+    let resolved = match known {
+        Some(r) => r,
+        None => {
+            set_status(app, id, Status::Resolving, None);
+            let r = crate::resolvers::resolve(app, &mirror.page).await?;
+            if flag.load(Ordering::SeqCst) != RUN {
+                return Err("Stopped while the mirror was being asked.".into());
+            }
+            if let Ok(mut map) = state.resolved.lock() {
+                map.insert(id.to_string(), r.clone());
+            }
+            r
+        }
+    };
+    edit(app, id, |d| {
+        d.url = resolved.url.clone();
+        // The name the mirror gives the file, for when its address has none
+        // (a page host's `/download?ticket=` says nothing about the file).
+        if d.archive_path.is_empty() {
+            if let Some(name) = &resolved.file_name {
+                d.file_name = safe_name(name);
+            }
+        }
+        if d.total.is_none() {
+            d.total = resolved.size;
+        }
+        // A resolved file of another size is another file: start it over.
+        if let (Some(size), Some(total)) = (resolved.size, d.total) {
+            if size != total && !d.segments.is_empty() {
+                d.segments.clear();
+                d.received = 0;
+                d.total = Some(size);
+            }
+        }
+    });
+    persist(app);
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (k, v) in &resolved.headers {
+        if let (Ok(k), Ok(v)) = (reqwest::header::HeaderName::from_bytes(k.as_bytes()), reqwest::header::HeaderValue::from_str(v)) {
+            headers.insert(k, v);
+        }
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(crate::resolvers::UA)
+        .default_headers(headers)
+        .tcp_nodelay(true)
+        .pool_max_idle_per_host(64)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok((client, connections.min(resolved.connections.max(1))))
 }
 
 /// Move bytes. `Ok(true)` finished, `Ok(false)` paused or cancelled.
@@ -839,23 +1022,10 @@ async fn transfer<R: Runtime>(
     }
     let response = request.send().await.map_err(|e| Transfer::Retry(e.to_string()))?;
     let status = response.status();
-    match status.as_u16() {
-        200 | 206 => {}
-        410 => {
-            return Err(Transfer::Fatal(
-                "The download link expired. Open the game in the Store and press Download again.".into(),
-            ))
-        }
-        403 => {
-            return Err(Transfer::Fatal(
-                "kryo.to refused the link - it only works on the network it was made for. Press Download again in the Store."
-                    .into(),
-            ))
-        }
-        416 if on_disk > 0 => return Ok(true),
-        s if s >= 500 => return Err(Transfer::Retry(format!("the server answered {s}"))),
-        s => return Err(Transfer::Fatal(format!("The download failed: the server answered {s}."))),
+    if status.as_u16() == 416 && on_disk > 0 {
+        return Ok(true);
     }
+    check_status(status.as_u16())?;
     let resumed = status.as_u16() == 206;
     let total = if resumed {
         response
@@ -875,6 +1045,7 @@ async fn transfer<R: Runtime>(
             .get(reqwest::header::CONTENT_DISPOSITION)
             .and_then(|v| v.to_str().ok())
             .and_then(filename_from_disposition)
+            .or_else(|| (!item.file_name.is_empty()).then(|| item.file_name.clone()))
             .or_else(|| file_name_in_link(&item.url))
             .or_else(|| {
                 response.url().path_segments().and_then(|mut s| s.next_back()).map(String::from)
@@ -966,10 +1137,7 @@ async fn transfer<R: Runtime>(
 fn check_status(code: u16) -> Result<(), Transfer> {
     match code {
         200 | 206 => Ok(()),
-        410 => Err(Transfer::Fatal("The download link expired. Open the game in the Store and press Download again.".into())),
-        403 => Err(Transfer::Fatal(
-            "kryo.to refused the link - it only works on the network it was made for. Press Download again in the Store.".into(),
-        )),
+        401 | 403 | 410 => Err(Transfer::Refused(code)),
         s if s >= 500 => Err(Transfer::Retry(format!("the server answered {s}"))),
         s => Err(Transfer::Fatal(format!("The download failed: the server answered {s}."))),
     }
@@ -1016,6 +1184,7 @@ async fn transfer_parallel<R: Runtime>(
             .get(reqwest::header::CONTENT_DISPOSITION)
             .and_then(|v| v.to_str().ok())
             .and_then(filename_from_disposition)
+            .or_else(|| (!item.file_name.is_empty()).then(|| item.file_name.clone()))
             .or_else(|| file_name_in_link(&item.url))
             .or_else(|| probe.url().path_segments().and_then(|mut s| s.next_back()).map(String::from))
             .map(|n| safe_name(&n))
@@ -1108,11 +1277,13 @@ async fn transfer_parallel<R: Runtime>(
     }
     let mut retry = None;
     let mut fatal = None;
+    let mut refused = None;
     for t in tasks {
         match t.await {
             Ok(Ok(())) => {}
             Ok(Err(Transfer::Retry(e))) => retry = Some(e),
             Ok(Err(Transfer::Fatal(e))) => fatal = Some(e),
+            Ok(Err(Transfer::Refused(code))) => refused = Some(code),
             Err(e) => retry = Some(e.to_string()),
         }
     }
@@ -1128,6 +1299,9 @@ async fn transfer_parallel<R: Runtime>(
     persist(app);
     if let Some(e) = fatal {
         return Err(Transfer::Fatal(e));
+    }
+    if let Some(code) = refused {
+        return Err(Transfer::Refused(code));
     }
     if flag.load(Ordering::SeqCst) != RUN {
         return Ok(false);
@@ -1284,6 +1458,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
             entries: item.meta.entries.clone(),
             source: item.meta.source.clone(),
             version: item.meta.version.clone(),
+            // An older build keeps itself; the current one follows updates.
+            pinned_version: item.release.clone(),
             short: item.meta.short.clone(),
             developer: item.meta.developer.clone(),
             nsfw: item.meta.nsfw,
@@ -1627,9 +1803,17 @@ pub fn downloads_list(state: State<'_, Downloads>) -> Vec<Download> {
 }
 
 #[tauri::command]
-pub fn download_pause(state: State<'_, Downloads>, id: String) {
+pub fn download_pause(app: AppHandle, state: State<'_, Downloads>, id: String) {
     if let Some(flag) = state.controls.lock().ok().and_then(|c| c.get(&id).cloned()) {
         flag.store(PAUSE, Ordering::SeqCst);
+        stop_resolving(&app, &id);
+    }
+}
+
+/// A download stopped while its mirror's page was open: close the page.
+fn stop_resolving(app: &AppHandle, id: &str) {
+    if edit(app, id, |_| {}).is_some_and(|d| d.status == Status::Resolving) {
+        crate::resolvers::cancel_browser(app);
     }
 }
 
@@ -1652,6 +1836,7 @@ pub fn download_resume(app: AppHandle, state: State<'_, Downloads>, id: String) 
 pub fn download_cancel(app: AppHandle, state: State<'_, Downloads>, id: String) {
     if let Some(flag) = state.controls.lock().ok().and_then(|c| c.get(&id).cloned()) {
         flag.store(CANCEL, Ordering::SeqCst);
+        stop_resolving(&app, &id);
         return;
     }
     // Not running (paused or failed): tidy up here.
@@ -1705,13 +1890,28 @@ mod tests {
             "hashes": [{ "name": "Until Then - Kryoto.7z", "sha256": "8087783ba95268c527b59dba1a7a745bfbef5df90574aa05d5dd02742c6d3ec5" }],
             "addons": [{ "label": "Online add-on", "links": [{ "name": "Until Then - Online - Kryoto.7z" }], "hashes": [] }]
         });
-        let (sha, addon) = match_file(&json, "Until Then - Kryoto.7z");
-        assert_eq!(sha.as_deref(), Some("8087783ba95268c527b59dba1a7a745bfbef5df90574aa05d5dd02742c6d3ec5"));
-        assert!(addon.is_none());
-        let (sha, addon) = match_file(&json, "Until Then - Online - Kryoto.7z");
-        assert!(sha.is_none());
-        assert_eq!(addon.as_deref(), Some("Online add-on"));
-        assert_eq!(match_file(&json, "something else.7z"), (None, None));
+        let m = match_file(&json, "Until Then - Kryoto.7z");
+        assert_eq!(m.sha.as_deref(), Some("8087783ba95268c527b59dba1a7a745bfbef5df90574aa05d5dd02742c6d3ec5"));
+        assert!(m.addon.is_none() && m.release.is_none());
+        let m = match_file(&json, "Until Then - Online - Kryoto.7z");
+        assert!(m.sha.is_none());
+        assert_eq!(m.addon.as_deref(), Some("Online add-on"));
+        assert_eq!(match_file(&json, "something else.7z"), FileMatch::default());
+    }
+
+    #[test]
+    fn an_older_releases_file_is_recognised_as_that_release() {
+        let json = serde_json::json!({
+            "hashes": [{ "name": "Game - Kryoto.7z", "sha256": "a".repeat(64) }],
+            "releases": [
+                { "version": "2.0", "primary": true, "hashes": [{ "name": "Game - Kryoto.7z", "sha256": "a".repeat(64) }] },
+                { "version": "1.4", "primary": false, "hashes": [{ "name": "Game 1.4 - Kryoto.7z", "sha256": "b".repeat(64) }] }
+            ]
+        });
+        let m = match_file(&json, "Game 1.4 - Kryoto.7z");
+        assert_eq!(m.sha, Some("b".repeat(64)));
+        assert_eq!(m.release.as_deref(), Some("1.4"));
+        assert_eq!(match_file(&json, "Game - Kryoto.7z").release, None);
     }
 
     #[test]

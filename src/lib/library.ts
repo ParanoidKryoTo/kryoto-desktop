@@ -41,6 +41,8 @@ export type LibraryGame = {
   lastPlayed: number | null
   addedAt: number
   version: string | null
+  /** A build picked under Versions: while it is installed, no update is offered. */
+  pinnedVersion?: string | null
   short: string | null
   developer: string | null
   /** kryo.to marks it an adult game; its art is blurred unless Settings says otherwise. */
@@ -75,6 +77,94 @@ export async function fetchAddons(slug: string): Promise<KryoAddon[]> {
   if (!res.ok) return []
   const json = (await res.json()) as { addons?: KryoAddon[] }
   return json.addons ?? []
+}
+
+/** Where a release can be downloaded from, as Kryoto Desktop sees it. */
+export type ReleaseSource =
+  /** Our own copy: through the Store's download sheet (it passes kryo.to's check). */
+  | { kind: 'ours' }
+  /** A mirror Kryoto downloads itself. `page` hosts open their page and may ask for a check. */
+  | { kind: 'mirror'; host: string; url: string; page: boolean }
+
+/** One full release of a game (`releases` in `/api/games/<slug>/downloads`). */
+export type KryoRelease = {
+  id: string
+  version: string
+  label: string | null
+  source: string | null
+  downloadSize: string | null
+  createdAt: string | null
+  /** The current release: what Install and updates get. */
+  primary: boolean
+  /** We no longer keep our own copy: mirrors only. */
+  archived: boolean
+  sources: ReleaseSource[]
+  /** Mirrors Kryoto can't fetch itself (MEGA, torrents): open in the browser. */
+  elsewhere: { host: string; url: string }[]
+}
+
+type RawLink = { host?: string; url?: string }
+type RawRelease = {
+  id: string | number
+  version?: string | null
+  label?: string | null
+  source?: string | null
+  download_size?: string | null
+  created_at?: string | null
+  primary?: boolean
+  archived?: boolean
+  links?: RawLink[]
+}
+
+/**
+ * A game's releases, newest first, each with the ways Kryoto can get it. Our
+ * own copy leads (fastest, and checked against its hash); mirrors the app
+ * resolves by itself follow, API hosts before page hosts.
+ */
+export async function fetchReleases(slug: string): Promise<KryoRelease[]> {
+  const res = await fetch(await catalogApiUrl(`/api/games/${encodeURIComponent(slug)}/downloads`))
+  if (!res.ok) throw new Error(res.status === 404 ? `kryo.to has no game at /game/${slug}.` : `kryo.to answered ${res.status}.`)
+  const json = (await res.json()) as {
+    releases?: RawRelease[]
+    version?: string
+    download_size?: string | null
+    links?: RawLink[]
+  }
+  // A kryo.to from before `releases`: the current release is all it names.
+  const raw: RawRelease[] = json.releases ?? [
+    { id: 'current', version: json.version ?? '', download_size: json.download_size ?? null, primary: true, links: json.links ?? [] },
+  ]
+  const external = raw.flatMap((r) => (r.links ?? []).map((l) => l.url ?? '')).filter((u) => /^https?:\/\//.test(u))
+  const known = new Map<string, { host: string; kind: string } | null>()
+  if (external.length) {
+    const kinds = await call<({ host: string; kind: string } | null)[]>('mirror_hosts', { urls: external }).catch(() => [])
+    external.forEach((u, i) => known.set(u, kinds[i] ?? null))
+  }
+  return raw.map((r) => {
+    const links = r.links ?? []
+    const ours = links.some((l) => l.url?.startsWith('/api/download/'))
+    const mirrors: ReleaseSource[] = []
+    const elsewhere: { host: string; url: string }[] = []
+    for (const l of links) {
+      if (!l.url || l.url.startsWith('/')) continue
+      const k = known.get(l.url)
+      if (k) mirrors.push({ kind: 'mirror', host: k.host, url: l.url, page: k.kind === 'page' })
+      else elsewhere.push({ host: l.host ?? 'Mirror', url: l.url })
+    }
+    mirrors.sort((a, b) => Number(a.kind === 'mirror' && a.page) - Number(b.kind === 'mirror' && b.page))
+    return {
+      id: String(r.id),
+      version: r.version ?? '',
+      label: r.label ?? null,
+      source: r.source ?? null,
+      downloadSize: r.download_size ?? null,
+      createdAt: r.created_at ?? null,
+      primary: !!r.primary,
+      archived: !!r.archived,
+      sources: [...(ours && !r.archived ? [{ kind: 'ours' } as const] : []), ...mirrors],
+      elsewhere,
+    }
+  })
 }
 
 export type GameStateEvent = { id: string; running: boolean; seconds: number | null; code: number | null }
