@@ -20,6 +20,7 @@ mod browser;
 mod buzzheavier;
 mod gofile;
 mod mediafire;
+mod mocha;
 mod pixeldrain;
 mod simple;
 
@@ -134,6 +135,11 @@ pub fn classify(url: &str) -> Option<(Kind, &'static str)> {
     if simple::fuckingfast_matches(url) {
         return Some((Kind::Api, "FuckingFast"));
     }
+    // Our own Mocha shares: dl.kryo.to signs a direct link (mocha.rs). Any
+    // other Mocha link is a page host below.
+    if mocha::share_token(url).is_some() {
+        return Some((Kind::Api, "Mocha"));
+    }
     if host_matches(url, &DIRECT_RE) {
         return Some((Kind::Direct, "catbox"));
     }
@@ -165,6 +171,8 @@ pub async fn resolve<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Resolv
                 buzzheavier::resolve(url).await
             } else if mediafire::matches(url) {
                 mediafire::resolve(url).await
+            } else if mocha::share_token(url).is_some() {
+                mocha::hotlink(url).await
             } else {
                 simple::fuckingfast(url).await
             };
@@ -210,7 +218,8 @@ mod tests {
         assert_eq!(classify("https://gofile.io/d/dc1V9W").map(|c| c.0), Some(Kind::Api));
         assert_eq!(classify("https://buzzheavier.com/AbCd1234").map(|c| c.1), Some("Buzzheavier"));
         assert_eq!(classify("https://vikingfile.com/f/xyz").map(|c| c.0), Some(Kind::Page));
-        assert_eq!(classify("https://mocha.my/share/tok").map(|c| c.1), Some("Mocha"));
+        assert_eq!(classify("https://mocha.my/share/pvpgaoYk-6So_SEvo").map(|c| c.0), Some(Kind::Api));
+        assert_eq!(classify("https://mocha.my/share/tok").map(|c| c.0), Some(Kind::Page));
         assert_eq!(classify("https://files.catbox.moe/x.7z").map(|c| c.0), Some(Kind::Direct));
         assert_eq!(classify("https://mega.nz/file/abc"), None);
         assert_eq!(classify("magnet:?xt=urn:btih:abc"), None);
