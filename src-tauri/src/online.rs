@@ -364,7 +364,7 @@ fn undo_files(root: &Path, rec: &LocalOnline) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn online_undo(app: AppHandle, game_id: String) -> Result<LibraryGame, String> {
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let rec = game.online.clone().ok_or("Kryoto Online is not set up for this game.")?;

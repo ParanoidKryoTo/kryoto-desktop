@@ -104,7 +104,7 @@ const settings: Record<string, unknown> = {
   startWithSystem: false,
   pressEffect: true,
   sharePlaytime: true,
-  connections: 8,
+  connections: 16,
   speedLimitMb: 0,
   catalogEndpoint: '',
   linuxMangohud: false,

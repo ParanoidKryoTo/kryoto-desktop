@@ -57,6 +57,12 @@ pub struct Settings {
     pub linux_gamemode: bool,
     /// Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions.
     pub linux_fsr: bool,
+    /// Settings written before 0.3 had 8 connections as the default. The first
+    /// load after that moves an untouched 8 to the new default of 16, once.
+    /// Missing from an old file reads as false (the field's own default, not
+    /// the struct's).
+    #[serde(default)]
+    pub connections_v2: bool,
 }
 
 impl Default for Settings {
@@ -79,12 +85,13 @@ impl Default for Settings {
             start_with_system: false,
             press_effect: true,
             share_playtime: true,
-            connections: 8,
+            connections: 16,
             speed_limit_mb: 0,
             catalog_endpoint: String::new(),
             linux_mangohud: false,
             linux_gamemode: false,
             linux_fsr: false,
+            connections_v2: true,
         }
     }
 }
@@ -159,15 +166,34 @@ pub fn same_path(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
+/// The settings as last read or written. `load` runs on every Store
+/// navigation and page report, which is no reason to go to the disk each time.
+static CACHE: std::sync::RwLock<Option<Settings>> = std::sync::RwLock::new(None);
+
 pub fn write<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), String> {
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     let target = file(app)?;
     let tmp = target.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, target).map_err(|e| e.to_string())
+    std::fs::rename(tmp, target).map_err(|e| e.to_string())?;
+    if let Ok(mut cache) = CACHE.write() {
+        *cache = Some(settings.clone());
+    }
+    Ok(())
 }
 
 pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
+    if let Some(s) = CACHE.read().ok().and_then(|c| c.clone()) {
+        return s;
+    }
+    let s = read(app);
+    if let Ok(mut cache) = CACHE.write() {
+        *cache = Some(s.clone());
+    }
+    s
+}
+
+fn read<R: Runtime>(app: &AppHandle<R>) -> Settings {
     let mut s: Settings = file(app)
         .ok()
         .and_then(|f| std::fs::read_to_string(f).ok())
@@ -177,20 +203,29 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
         let home = app.path().home_dir().unwrap_or_else(|_| PathBuf::from("."));
         s.library_dir = home.join("Kryoto Games").to_string_lossy().into_owned();
     }
+    if !s.connections_v2 {
+        if s.connections == 8 {
+            s.connections = 16;
+        }
+        s.connections_v2 = true;
+        let _ = write(app, &s);
+    }
     s
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_get(app: AppHandle) -> Settings {
     load(&app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings, String> {
     if settings.library_dir.trim().is_empty() {
         return Err("Pick a folder for the library.".into());
     }
     settings.catalog_endpoint = normalize_catalog_endpoint(&settings.catalog_endpoint)?;
+    // A choice made in Settings is the player's, never migrated again.
+    settings.connections_v2 = true;
     std::fs::create_dir_all(&settings.library_dir)
         .map_err(|e| format!("Cannot use {}: {e}", settings.library_dir))?;
     let before = load(&app);
@@ -210,6 +245,14 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
 #[cfg(test)]
 mod tests {
     use super::{catalog_endpoint, is_catalog_origin, normalize_catalog_endpoint, Settings, DEFAULT_CATALOG_ENDPOINT};
+
+    #[test]
+    fn an_old_file_is_moved_to_the_new_connection_default_once() {
+        let old: Settings = serde_json::from_str(r#"{"connections":8}"#).unwrap();
+        assert!(!old.connections_v2);
+        let new: Settings = serde_json::from_str(r#"{"connections":8,"connectionsV2":true}"#).unwrap();
+        assert!(new.connections_v2);
+    }
 
     #[test]
     fn custom_endpoint_is_a_safe_origin() {

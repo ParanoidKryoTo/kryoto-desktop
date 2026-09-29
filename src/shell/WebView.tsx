@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Lock, LockOpen, Plus, RotateCw, X, Library } from 'lucide-react'
+import { Lock, LockOpen, Plus, RotateCw, X, Library, WifiOff } from 'lucide-react'
 import { AsciiBar, Button } from '@/ui'
 import { isTauri, mountStore, setMainPlacer, STORE_HOME } from '@/lib/window'
 import { resolveUserInputToUrl } from '@/lib/browser'
@@ -14,7 +14,18 @@ import type { BrowserPageState } from '@/hooks/useBrowserPage'
  * What is drawn here is only ever seen when the view is not: while it first
  * loads, and when a page fails.
  */
-export function WebSlot({ page, onRetry }: { page: BrowserPageState; onRetry: () => void }) {
+export function WebSlot({
+  page,
+  onRetry,
+  offline = false,
+  onLibrary,
+}: {
+  page: BrowserPageState
+  onRetry: () => void
+  /** No connection: the Store says so, once, and points at what still works. */
+  offline?: boolean
+  onLibrary?: () => void
+}) {
   const slot = useRef<HTMLDivElement | null>(null)
   const [mountError, setMountError] = useState<string | null>(null)
 
@@ -47,11 +58,25 @@ export function WebSlot({ page, onRetry }: { page: BrowserPageState; onRetry: ()
   // dialog - where a loading bar would read as "the Store is stuck".
   const [shown, setShown] = useState(false)
   useEffect(() => {
-    if (!page.loading && page.progress >= 100) setShown(true)
-  }, [page.loading, page.progress])
+    if (!page.loading) setShown(true)
+  }, [page.loading])
   return (
     <div ref={slot} className="absolute inset-0 grid place-content-center justify-items-center gap-4 bg-background text-center">
-      {problem ? (
+      {offline ? (
+        <>
+          <WifiOff className="size-6 text-muted-foreground" />
+          <p className="text-xs uppercase tracking-[0.25em] text-primary">The Store could not load</p>
+          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+            This PC is offline. Your library, installed games and settings all still work, and the Store comes back by itself
+            when the connection does.
+          </p>
+          {onLibrary ? (
+            <Button variant="primary" onClick={onLibrary}>
+              Go to your library
+            </Button>
+          ) : null}
+        </>
+      ) : problem ? (
         <>
           <p className="text-xs uppercase tracking-[0.25em] text-primary">The store did not open</p>
           <p className="max-w-md text-xs text-muted-foreground">{problem}</p>
@@ -73,6 +98,32 @@ export function WebSlot({ page, onRetry }: { page: BrowserPageState; onRetry: ()
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * A thin line along the pill's foot while a page loads. The web view only
+ * says "started" and "finished", so it eases towards 90% and then completes;
+ * it animates here, so a load redraws this line and not the whole client.
+ */
+function LoadLine({ loading }: { loading: boolean }) {
+  const [progress, setProgress] = useState<number | null>(null)
+  useEffect(() => {
+    if (!loading) {
+      setProgress((p) => (p === null ? null : 100))
+      const t = window.setTimeout(() => setProgress(null), 250)
+      return () => window.clearTimeout(t)
+    }
+    setProgress(8)
+    const t = window.setInterval(() => setProgress((p) => Math.min(90, (p ?? 8) + Math.max(0.5, (90 - (p ?? 8)) * 0.08))), 120)
+    return () => window.clearInterval(t)
+  }, [loading])
+  if (progress === null) return null
+  return (
+    <span
+      className="absolute bottom-0 left-0 h-px bg-foreground transition-[width,opacity] duration-200"
+      style={{ width: `${progress}%`, opacity: progress >= 100 ? 0 : 1 }}
+    />
   )
 }
 
@@ -125,12 +176,7 @@ export function UrlPill({
         >
           {page.loading ? <X className="size-3.5" /> : <RotateCw className="size-3.5" />}
         </button>
-        {page.loading ? (
-          <span
-            className="absolute bottom-0 left-0 h-px bg-foreground transition-[width] duration-150"
-            style={{ width: `${page.progress}%` }}
-          />
-        ) : null}
+        <LoadLine loading={page.loading} />
       </div>
       {onLibrary ? (
         <Button variant={inLibrary ? 'outline' : 'primary'} onClick={onLibrary}>

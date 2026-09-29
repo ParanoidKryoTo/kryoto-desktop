@@ -51,7 +51,10 @@ sharing its data, and never send error reports.
 | `src-tauri/src/launch.rs` | what Play runs: Steam launch entries, launch options, Wine/Proton |
 | `src-tauri/src/library.rs` | `library.json`, play/stop, play time, uninstall |
 | `src-tauri/src/storage.rs` | library folders, drive space, moving games between drives |
-| `src-tauri/src/system.rs` | tray, single instance, start with Windows, the pop-up menu window |
+| `src-tauri/src/system.rs` | tray, single instance, start with Windows, window state |
+| `src-tauri/src/menus.rs` | the menu view: menus drawn in a web view stacked over the Store, inside the main window |
+| `src-tauri/src/linux_overlay.rs` | Linux: laying the Store and the menu view over the shell, and resizing from the window's edges |
+| `src/lib/history.ts` | the one Back / Forward history for the Library, the Store's pages and everything else |
 | `src/lib/updates.ts`, `src/shell/UpdatePrompt.tsx` | the in-app updater: the check on launch, the prompt, Check for updates in About |
 | `src-tauri/src/logging.rs` | the log file, crash capture, reports to kryo.to |
 | `src/boot` | the start box and sign-in |

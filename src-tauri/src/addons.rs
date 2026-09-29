@@ -115,7 +115,7 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
 
 /// Take an add-on out again: delete every file it wrote, then any folders it
 /// left empty. Deletes; nothing is restored.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn addon_undo(app: AppHandle, game_id: String, file: String) -> Result<LibraryGame, String> {
     let game = library::load(&app)?.into_iter().find(|g| g.id == game_id).ok_or("That game is no longer in the library.")?;
     let addon = game.addons.iter().find(|a| a.file == file).cloned().ok_or("That add-on is not applied.")?;

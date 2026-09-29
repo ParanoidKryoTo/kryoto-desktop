@@ -18,8 +18,8 @@ export type NavTabSpec = {
  * Back / forward, then STORE · LIBRARY · COMMUNITY · <NAME> as kryo.to's
  * segmented pill - the white segment is where you are. Each tab opens its
  * section on click and shows its pages on hover, after a short pause so a
- * pointer sweeping across does not flash menus. The menus open in the pop-up
- * window, so they sit over the Store without stopping it. The right side
+ * pointer sweeping across does not flash menus. The menus open in the menu
+ * view, so they sit over the Store without stopping it. The right side
  * carries whatever the current page adds: the Store's address, the Library's
  * actions.
  */
@@ -90,7 +90,7 @@ function NavTab({ tab, current }: { tab: NavTabSpec; current: boolean }) {
     }, delay)
   }
 
-  // Leaving the pop-up (not into the tab) closes it, like leaving the tab.
+  // Leaving the menu (not into the tab) closes it, like leaving the tab.
   useEffect(() => {
     if (!native) return
     return onPopupHover((inside) => {
@@ -108,7 +108,10 @@ function NavTab({ tab, current }: { tab: NavTabSpec; current: boolean }) {
       onPointerEnter={() => {
         onTab.current = true
         clear()
-        if (!open) timer.current = window.setTimeout(show, 280)
+        if (open) return
+        // Moving over from another tab's open menu switches straight away.
+        const other = native && popupOpen()?.startsWith('tab:')
+        timer.current = window.setTimeout(show, other ? 0 : 280)
       }}
       onPointerLeave={() => {
         onTab.current = false
@@ -119,6 +122,7 @@ function NavTab({ tab, current }: { tab: NavTabSpec; current: boolean }) {
       <button
         ref={button}
         type="button"
+        data-menu={native ? menuId : undefined}
         aria-current={current ? 'page' : undefined}
         aria-expanded={tab.items.length ? open : undefined}
         onClick={() => {

@@ -1,4 +1,5 @@
 mod addons;
+mod art;
 mod compat;
 mod downloads;
 mod launch;
@@ -7,7 +8,9 @@ mod links;
 #[cfg(target_os = "linux")]
 mod linux_overlay;
 mod logging;
+mod menus;
 mod online;
+mod resolvers;
 mod settings;
 mod storage;
 mod system;
@@ -29,8 +32,9 @@ struct BrowserState {
     url: String,
     title: String,
     loading: bool,
-    can_go_back: bool,
-    can_go_forward: bool,
+    nav: Option<String>,
+    back: Option<String>,
+    forward: Option<String>,
     error: Option<String>,
 }
 
@@ -52,21 +56,26 @@ struct Account {
 
 /// State reported by the page-side script.
 ///
-/// The `url` field is accepted for shape but never trusted - the handler uses
-/// the web view's real URL, so a page cannot spoof the address bar or claim to
-/// be kryo.to when reporting an account.
+/// The `url` field is only believed when it is on the web view's real origin
+/// (a same-origin `pushState` can be ahead of what the native side reports),
+/// so a page cannot spoof the address bar or claim to be kryo.to when
+/// reporting an account.
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserReport {
-    #[allow(dead_code)]
     url: String,
     #[serde(default)]
     title: Option<String>,
     loading: bool,
+    /// How the page got to this address: `load`, `push`, `replace` or
+    /// `pop`. Absent when only the title (or the account) is being reported.
     #[serde(default)]
-    can_go_back: bool,
+    nav: Option<String>,
+    /// The page's own previous and next addresses.
     #[serde(default)]
-    can_go_forward: bool,
+    back: Option<String>,
+    #[serde(default)]
+    forward: Option<String>,
     #[serde(default)]
     error: Option<String>,
     /// `Some(None)` = signed out; absent = not reported this time.
@@ -146,6 +155,53 @@ fn merge_download_context(
     (slug.or(page_slug), title)
 }
 
+/// The game whose page the Store is on, when `url` is a mirror Kryoto can
+/// download from. Anywhere else the link opens like any other.
+fn mirror_on_game_page<R: Runtime>(app: &tauri::AppHandle<R>, url: &url::Url) -> Option<String> {
+    resolvers::classify(url.as_str())?;
+    let page = app.get_webview(STORE)?.url().ok()?;
+    game_slug(&page, &settings::load(app))
+}
+
+/// Download a game from one of its mirrors (the Library's download options
+/// and Versions). `release` is the version string when it is not the current
+/// release.
+#[tauri::command]
+fn download_mirror(
+    app: tauri::AppHandle,
+    url: String,
+    slug: String,
+    title: Option<String>,
+    release: Option<String>,
+) -> Result<(), String> {
+    downloads::enqueue_mirror(&app, url, Some(slug), title, release)
+}
+
+#[derive(serde::Serialize)]
+struct MirrorHost {
+    host: &'static str,
+    /// `api` and `direct` download straight away; `page` opens the host's
+    /// page in a window of its own and may ask for a check.
+    kind: &'static str,
+}
+
+/// Which of these links Kryoto can download from itself.
+#[tauri::command]
+fn mirror_hosts(urls: Vec<String>) -> Vec<Option<MirrorHost>> {
+    urls.iter()
+        .map(|u| {
+            resolvers::classify(u).map(|(kind, host)| MirrorHost {
+                host,
+                kind: match kind {
+                    resolvers::Kind::Api => "api",
+                    resolvers::Kind::Direct => "direct",
+                    resolvers::Kind::Page => "page",
+                },
+            })
+        })
+        .collect()
+}
+
 /// Only plain web navigation stays inside the web view. Everything else
 /// (file:, javascript:, data:, custom schemes) is blocked and reported.
 fn allowed_browser_url(url: &url::Url) -> bool {
@@ -193,17 +249,30 @@ fn store<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<tauri::Webview<R>, Str
     app.get_webview(STORE).ok_or_else(|| "The store is not open.".to_string())
 }
 
+/// Store events are the shell's business only.
 fn emit_state<R: Runtime>(app: &tauri::AppHandle<R>, state: BrowserState) {
-    let _ = app.emit("browser-state", &state);
+    let _ = app.emit_to("main", "browser-state", &state);
 }
 
-/// Page-side reporting: SPA history (the native layer only sees full loads),
-/// title changes, and - on kryo.to only - who is signed in. It only REPORTS;
-/// the shell trusts the web view's URL from the native side.
+/// Page-side reporting, run on every page the Store finishes loading. It only
+/// REPORTS; the shell checks the address against the web view's own.
+///
+/// * Navigation: every change of address with how it happened (`load`,
+///   `push`, `replace`, `pop`), so the shell keeps one history for the whole
+///   client and a redirect or a page's own `replaceState` never adds a step.
+///   `back`/`forward` are the page's neighbours, so the shell can step with
+///   the page's own history (instant) when it matches its own.
+/// * Title changes, batched.
+/// * On kryo.to only: who is signed in, the bell, what is new, and the saved
+///   games. The account is looked at on each page change (cheap); the saved
+///   games list, which can be long, only when the account changes, when asked
+///   (`__kryoDesktopRefresh`) or every ten minutes.
+/// * Clicks, so an open menu closes like it would over any other page.
 const BROWSER_STATE_SCRIPT: &str = r#"
 (() => {
   if (window.__kryoDesktop) return;
   window.__kryoDesktop = true;
+  const KRYO = __KRYO__;
   const key = '__kryo_desktop_history__';
   const invoke = (command, payload) => {
     try {
@@ -216,50 +285,91 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     try { return JSON.parse(sessionStorage.getItem(key) || 'null') || { entries: [], index: -1 }; }
     catch (_) { return { entries: [], index: -1 }; }
   };
-  const report = (extra) => {
+  const save = (s) => { try { sessionStorage.setItem(key, JSON.stringify(s)); } catch (_) {} };
+  let state = readState();
+  const send = (extra) => {
     try {
-      const s = readState();
       invoke('report_catalog_state', { state: Object.assign({
         url: location.href,
         title: (document.title || '').slice(0, 200),
         loading: false,
-        canGoBack: s.index > 0,
-        canGoForward: s.index >= 0 && s.index < s.entries.length - 1
+        back: state.entries[state.index - 1] || null,
+        forward: state.entries[state.index + 1] || null
       }, extra || {}) });
     } catch (_) {}
   };
-  const save = (s) => { try { sessionStorage.setItem(key, JSON.stringify(s)); } catch (_) {} };
-  let state = readState();
+  let sent = '';
+  let titleTimer = 0;
+  const report = (nav) => {
+    sent = location.href + '\n' + document.title;
+    send({ nav });
+  };
+  // A title that changes after the page does is sent once, a moment later.
+  const reportTitle = () => {
+    clearTimeout(titleTimer);
+    titleTimer = setTimeout(() => {
+      if (location.href + '\n' + document.title !== sent) report(null);
+    }, 150);
+  };
+
+  // This page's place in the tab's history (sessionStorage outlives loads).
   const current = location.href;
   if (!Array.isArray(state.entries) || state.index < 0) state = { entries: [current], index: 0 };
   else if (state.entries[state.index] !== current) {
-    const at = state.entries.indexOf(current);
-    if (at >= 0) state.index = at;
-    else { state.entries = state.entries.slice(0, state.index + 1).concat(current); state.index = state.entries.length - 1; }
+    if (state.entries[state.index - 1] === current) state.index -= 1;
+    else if (state.entries[state.index + 1] === current) state.index += 1;
+    else { state.entries = state.entries.slice(0, state.index + 1).concat(current).slice(-100); state.index = state.entries.length - 1; }
   }
   save(state);
-  const track = (next) => {
-    state.entries = state.entries.slice(0, state.index + 1).concat(next);
-    state.index = state.entries.length - 1;
-    save(state); report();
+  let pathname = location.pathname;
+  const moved = (nav) => {
+    save(state);
+    report(nav);
+    if (location.pathname !== pathname) { pathname = location.pathname; soon(); }
   };
   const push = history.pushState.bind(history);
-  history.pushState = (...a) => { const r = push(...a); track(location.href); return r; };
+  history.pushState = (...a) => {
+    const r = push(...a);
+    state.entries = state.entries.slice(0, state.index + 1).concat(location.href).slice(-100);
+    state.index = state.entries.length - 1;
+    moved('push');
+    return r;
+  };
   const replace = history.replaceState.bind(history);
-  history.replaceState = (...a) => { const r = replace(...a); state.entries[state.index] = location.href; save(state); report(); return r; };
+  history.replaceState = (...a) => {
+    const before = location.href;
+    const r = replace(...a);
+    if (location.href === before) return r;
+    state.entries[state.index] = location.href;
+    moved('replace');
+    return r;
+  };
   addEventListener('popstate', () => {
-    const at = state.entries.indexOf(location.href);
-    if (at >= 0) state.index = at; else track(location.href);
-    save(state); report();
+    const here = location.href;
+    if (state.entries[state.index - 1] === here) state.index -= 1;
+    else if (state.entries[state.index + 1] === here) state.index += 1;
+    else {
+      const at = state.entries.lastIndexOf(here);
+      if (at >= 0) state.index = at;
+      else { state.entries = state.entries.slice(0, state.index + 1).concat(here); state.index = state.entries.length - 1; }
+    }
+    moved('pop');
   });
-  try { new MutationObserver(() => report()).observe(document.querySelector('title') || document.head, { childList: true, subtree: true, characterData: true }); } catch (_) {}
-  const who = () => {
-    fetch('/api/changelog/latest').then((r) => r.json()).then((j) => report({ news: j })).catch(() => {});
-    fetch('/api/auth/me', { credentials: 'include' })
-      .then((r) => r.json())
+  try { new MutationObserver(reportTitle).observe(document.querySelector('title') || document.head, { childList: true, subtree: true, characterData: true }); } catch (_) {}
+
+  let me;
+  let savedAt = 0;
+  const json = (path) => fetch(path, { credentials: 'include' }).then((r) => r.json());
+  const who = (full) => {
+    if (!KRYO) return;
+    if (full) json('/api/changelog/latest').then((j) => send({ news: j })).catch(() => {});
+    json('/api/auth/me')
       .then((j) => {
         const u = j && j.user;
-        report({ account: u ? {
+        const id = u ? u.username : null;
+        const changed = id !== me;
+        me = id;
+        if (changed || full) send({ account: u ? {
           username: u.username,
           displayName: u.displayName || null,
           avatarUrl: u.avatarUrl || null,
@@ -273,18 +383,22 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           }
         } : null });
         if (!u) return;
-        fetch('/api/account/library', { credentials: 'include' })
-          .then((r) => r.json())
-          .then((l) => report({ saved: { entries: (l.entries || []).slice(0, 2000) } }))
+        json('/api/notifications?limit=8')
+          .then((n) => send({ inbox: { unreadCount: n.unreadCount || 0, notifications: (n.notifications || []).slice(0, 8) } }))
           .catch(() => {});
-        fetch('/api/notifications?limit=8', { credentials: 'include' })
-          .then((r) => r.json())
-          .then((n) => report({ inbox: { unreadCount: n.unreadCount || 0, notifications: (n.notifications || []).slice(0, 8) } }))
-          .catch(() => {});
+        if (changed || full || Date.now() - savedAt > 600000) {
+          savedAt = Date.now();
+          json('/api/account/library')
+            .then((l) => send({ saved: { entries: (l.entries || []).slice(0, 2000) } }))
+            .catch(() => {});
+        }
       })
       .catch(() => {});
   };
-  window.__kryoDesktopRefresh = who;
+  // Signing in or out happens on a page: look again once a new one settles.
+  let whoTimer = 0;
+  const soon = () => { clearTimeout(whoTimer); whoTimer = setTimeout(() => who(false), 800); };
+  window.__kryoDesktopRefresh = () => who(true);
   // kryo.to names a download right before it starts it (the site's
   // game-downloads.tsx): the download can reach the app without the
   // address's #fragment, so this is the context that holds.
@@ -303,6 +417,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   const side = (e) => { if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation(); return true } return false };
   addEventListener('mousedown', side, true);
   addEventListener('mouseup', (e) => { if (side(e)) invoke('store_nav_button', { forward: e.button === 4 }) }, true);
+  // A press anywhere in the page closes an open menu.
+  addEventListener('pointerdown', () => invoke('menu_close'), true);
   // A plain link that leaves kryo.to (Discord, Reddit, YouTube, a filehost's
   // page) opens in the system browser: window.open goes through the Store's
   // new-window handler, which sends anything not kryo.to out of the app.
@@ -320,13 +436,10 @@ const BROWSER_STATE_SCRIPT: &str = r#"
     e.preventDefault();
     window.open(url.href, '_blank', 'noopener');
   });
-  addEventListener('offline', () => report({ error: 'offline' }));
-  report();
-  who();
-  // Signing in or out happens on a page; look again when one settles.
-  setInterval(who, 60000);
-  let last = location.pathname;
-  setInterval(() => { if (location.pathname !== last) { last = location.pathname; who(); } }, 1500);
+  addEventListener('offline', () => send({ error: 'offline' }));
+  report('load');
+  who(true);
+  setInterval(() => who(false), 60000);
 })();
 "#;
 
@@ -351,7 +464,7 @@ fn open_external_url(url: &str) -> Result<(), String> {
 }
 
 /// Open a link in the system browser.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_external(url: String) -> Result<(), String> {
     open_external_url(&url)
 }
@@ -463,6 +576,12 @@ async fn store_mount(
                 if let Some(view) = popup_app.get_webview(STORE) {
                     let _ = view.navigate(url);
                 }
+            } else if let Some(slug) = mirror_on_game_page(&popup_app, &url) {
+                // A mirror pressed on a game's page downloads here, from
+                // that mirror, instead of in a browser.
+                if let Err(e) = downloads::enqueue_mirror(&popup_app, url.to_string(), Some(slug), None, None) {
+                    let _ = popup_app.emit("notify", downloads::Notice::new("Can't use that mirror", &e, None));
+                }
             } else if allowed_browser_url(&url) {
                 let _ = open_external_url(url.as_str());
             }
@@ -527,11 +646,10 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
 /// Linux defaults that make the client behave, set before GTK starts. Each is
 /// left alone when the environment already sets it, so anyone can opt out.
 ///
-/// * `GDK_BACKEND=x11` on a Wayland session (through XWayland). The menus are
-///   a small window of their own placed under the button that opened them,
-///   and Wayland does not let a window choose where it goes: they opened in
-///   the middle of the screen, or behind the client, and closed on the first
-///   focus change.
+/// * `GDK_BACKEND=x11` on a Wayland session (through XWayland). The client
+///   moves, centres and resizes its own frameless window, which Wayland does
+///   not let a window do; the menus live inside the window now, but those
+///   still need it.
 /// * `WEBKIT_DISABLE_DMABUF_RENDERER=1`: WebKitGTK's DMA-BUF renderer draws
 ///   blank, torn or offset pages on many drivers (NVIDIA in particular).
 #[cfg(target_os = "linux")]
@@ -614,27 +732,30 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
     if is_kryoto(&actual, &app) {
         if let Some(account) = state.account {
             logging::set_account(account.as_ref().map(|a| a.username.clone()));
-            let _ = app.emit("account-state", account);
+            let _ = app.emit_to("main", "account-state", account);
         }
         if let Some(inbox) = state.inbox {
-            let _ = app.emit("inbox-state", inbox);
+            let _ = app.emit_to("main", "inbox-state", inbox);
         }
         if let Some(news) = state.news {
-            let _ = app.emit("news-state", news);
+            let _ = app.emit_to("main", "news-state", news);
         }
         if let Some(saved) = state.saved {
-            let _ = app.emit("saved-state", saved);
+            let _ = app.emit_to("main", "saved-state", saved);
         }
     }
+    let same_origin = |u: &str| u.parse::<url::Url>().ok().filter(|u| u.origin() == actual.origin());
+    let url = same_origin(&state.url).unwrap_or_else(|| actual.clone());
     let error = state.error.map(|v| v.trim().to_string()).filter(|v| !v.is_empty() && v != "offline");
     emit_state(
         &app,
         BrowserState {
-            url: actual.to_string(),
+            url: url.to_string(),
             title: state.title.unwrap_or_default(),
             loading: state.loading,
-            can_go_back: state.can_go_back,
-            can_go_forward: state.can_go_forward,
+            nav: state.nav.filter(|n| matches!(n.as_str(), "load" | "push" | "replace" | "pop")),
+            back: state.back.as_deref().and_then(same_origin).map(|u| u.to_string()),
+            forward: state.forward.as_deref().and_then(same_origin).map(|u| u.to_string()),
             error,
         },
     );
@@ -797,7 +918,7 @@ pub fn run() {
         .manage(library::Running::default())
         .manage(downloads::Downloads::new())
         .manage(storage::Moving::default())
-        .manage(system::Popup::default())
+        .manage(menus::Menus::default())
         .manage(PendingDownload::default())
         .setup(move |app| {
             logging::init(app.handle());
@@ -805,6 +926,7 @@ pub fn run() {
             // Off the main thread: registry and xdg-mime are not worth a frame.
             std::thread::spawn(links::register);
             downloads::init(app.handle());
+            art::prune(app.handle(), 512 * 1024 * 1024);
             if let Some(l) = listener.take() {
                 system::serve_instance(app.handle().clone(), l);
             }
@@ -818,6 +940,16 @@ pub fn run() {
                 }
             }
             Ok(())
+        })
+        // Game art, cached on this PC (art.rs). Only the shell's own views may
+        // ask: a Store page has no business reaching through it.
+        .register_asynchronous_uri_scheme_protocol(art::SCHEME, |ctx, request, responder| {
+            if !matches!(ctx.webview_label(), "main" | menus::LABEL) {
+                responder.respond(tauri::http::Response::builder().status(403).body(Vec::new()).unwrap_or_default());
+                return;
+            }
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn(async move { responder.respond(art::serve(app, request).await) });
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
@@ -888,13 +1020,15 @@ pub fn run() {
                     url: payload.url().to_string(),
                     title: String::new(),
                     loading,
-                    can_go_back: false,
-                    can_go_forward: false,
+                    nav: None,
+                    back: None,
+                    forward: None,
                     error: None,
                 },
             );
             if !loading {
-                let _ = webview.eval(BROWSER_STATE_SCRIPT);
+                let kryo = is_kryoto(payload.url(), webview.app_handle());
+                let _ = webview.eval(BROWSER_STATE_SCRIPT.replace("__KRYO__", if kryo { "true" } else { "false" }));
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -932,6 +1066,8 @@ pub fn run() {
             downloads::download_resume,
             downloads::download_cancel,
             downloads::download_remove,
+            download_mirror,
+            mirror_hosts,
             compat::compat_tools,
             compat::compat_status,
             compat::compat_install,
@@ -953,12 +1089,13 @@ pub fn run() {
             system::app_exit,
             system::os_notify,
             system::pick_path,
-            system::popup_open,
-            system::popup_payload,
-            system::popup_ready,
-            system::popup_select,
-            system::popup_close,
-            system::popup_hover
+            system::window_state_get,
+            menus::menu_open,
+            menus::menu_payload,
+            menus::menu_ready,
+            menus::menu_pick,
+            menus::menu_close,
+            menus::menu_hover
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kryoto Desktop");

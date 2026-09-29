@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import { artSrc } from '@/lib/art'
 import { Bell, Code2, Download, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
 import { settingsApi, useSettings, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
-import { browserNavigate, catalogUrl, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
+import { browserNavigate, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
@@ -86,7 +87,7 @@ export function SettingsPage({
       <nav aria-label="Settings" className="flex min-h-0 flex-col gap-5 overflow-auto border-r border-border bg-card/40 p-3">
         <div className="flex items-center gap-2.5 px-2 pt-2">
           {account.avatarUrl ? (
-            <img src={account.avatarUrl} alt="" className="kryo-pill size-9 object-cover" />
+            <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-9 object-cover" />
           ) : (
             <span className="kryo-pill grid size-9 place-items-center bg-secondary text-xs font-bold">{name.slice(0, 1).toUpperCase()}</span>
           )}
@@ -140,12 +141,11 @@ function Rail({ title, items, current, onSection }: { title: string; items: Rail
 
 /**
  * kryo.to's settings in the pane: the Store's web view, moved here and sent
- * to the category. It goes back where it was, and to the page it was on,
- * when you leave.
+ * to the category. It goes back to its own place when you leave; the Store
+ * returns to its page when it is next shown (Shell follows its history).
  */
 function WebPane({ fragment, page }: { fragment: string; page: BrowserPageState }) {
   const slot = useRef<HTMLDivElement | null>(null)
-  const returnTo = useRef<string | null>(null)
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
@@ -155,16 +155,12 @@ function WebPane({ fragment, page }: { fragment: string; page: BrowserPageState 
       const r = el.getBoundingClientRect()
       if (r.width > 2 && r.height > 2) void mountStore(STORE_HOME, { x: r.left, y: r.top, width: r.width, height: r.height })
     }
-    void catalogUrl()
-      .then((u) => (returnTo.current = /kryo\.to\/settings/.test(u) ? null : u))
-      .catch(() => {})
     place()
     const ro = new ResizeObserver(place)
     ro.observe(el)
     return () => {
       ro.disconnect()
       placeMainStore()
-      if (returnTo.current) void browserNavigate(returnTo.current).catch(() => {})
     }
   }, [])
 
@@ -256,10 +252,10 @@ function DesktopPane({ section }: { section: SettingsSection }) {
         {section === 'storage' ? <StoragePane onChanged={() => void settingsApi.get().then((v) => setS((cur) => (cur ? { ...cur, libraryDir: v.libraryDir, libraryFolders: v.libraryFolders } : v)))} /> : null}
         {section === 'downloads' ? (
           <>
-            <Section title="Connections" hint="More connections download faster on most lines. One is the slow, careful way.">
+            <Section title="Connections" hint="More connections download faster on most lines, the way a download manager does. One is the slow, careful way.">
               <Segmented
                 value={String(s.connections)}
-                options={['1', '4', '8', '16'].map((v) => ({ value: v, label: v }))}
+                options={['1', '4', '8', '16', '32'].map((v) => ({ value: v, label: v }))}
                 onChange={(v) => set('connections', Number(v))}
               />
             </Section>

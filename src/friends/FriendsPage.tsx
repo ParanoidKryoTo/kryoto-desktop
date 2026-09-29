@@ -1,4 +1,5 @@
 import { MessageSquare, Search, ShieldCheck, UserPlus, Users, Gamepad2 } from 'lucide-react'
+import { artSrc } from '@/lib/art'
 import { Button, Caption, Label } from '@/ui'
 import type { Account } from '@/hooks/useAccount'
 import { AsciiArt } from '@/ui/ascii/AsciiArt'
@@ -20,7 +21,7 @@ export function FriendsPage({ account, onProfile, onDiscord }: { account: Accoun
           className="kryo-square flex items-center gap-3 border-b border-border p-4 text-left transition-colors hover:bg-secondary"
         >
           {account.avatarUrl ? (
-            <img src={account.avatarUrl} alt="" className="kryo-pill size-11 object-cover" />
+            <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-11 object-cover" />
           ) : (
             <span className="kryo-pill grid size-11 place-items-center bg-secondary text-sm font-bold">{name.slice(0, 1).toUpperCase()}</span>
           )}

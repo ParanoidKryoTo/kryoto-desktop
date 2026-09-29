@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { isTauri, on } from '@/lib/bridge'
+import { isOnline } from '@/lib/online'
 import type { AccountAppearance } from '@/lib/settings'
 
 export type Account = {
@@ -21,14 +22,43 @@ export const GUEST: Account = { username: '', displayName: 'Guest', avatarUrl: n
  * real session. `undefined` until the Store has loaded and said; `null` when
  * signed out. One sign-in, shared by the Store and the client.
  */
+/**
+ * The last account kryo.to reported, kept so a start with no connection opens
+ * the client as that account (the Store cannot say who it is offline).
+ */
+const REMEMBER = 'kryoto.account'
+function remembered(): Account | undefined {
+  try {
+    const a = JSON.parse(localStorage.getItem(REMEMBER) ?? 'null') as Account | null
+    return a?.username ? a : undefined
+  } catch {
+    return undefined
+  }
+}
+function remember(a: Account | null) {
+  try {
+    if (a) localStorage.setItem(REMEMBER, JSON.stringify(a))
+    else localStorage.removeItem(REMEMBER)
+  } catch {
+    /* not important */
+  }
+}
+
 export function useAccount(): Account | null | undefined {
-  const [account, setAccount] = useState<Account | null | undefined>(
-    isTauri() ? undefined : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null },
+  const [account, setAccount] = useState<Account | null | undefined>(() =>
+    isTauri()
+      ? isOnline()
+        ? undefined
+        : remembered()
+      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null },
   )
   useEffect(() => {
     let stop: (() => void) | undefined
     let cancelled = false
-    void on<Account | null>('account-state', (a) => setAccount(a)).then((fn) => {
+    void on<Account | null>('account-state', (a) => {
+      remember(a)
+      setAccount(a)
+    }).then((fn) => {
       if (cancelled) fn()
       else stop = fn
     })

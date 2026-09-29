@@ -166,7 +166,7 @@ pub fn kind_of(tool: &Path) -> &'static str {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn compat_tools(app: AppHandle) -> Vec<CompatTool> {
     detect(&app)
 }
@@ -182,7 +182,7 @@ pub struct CompatStatus {
     gamemode: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn compat_status(app: AppHandle) -> CompatStatus {
     let managed = managed_dir(&app);
     CompatStatus {

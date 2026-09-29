@@ -18,13 +18,15 @@ import {
   type LibraryGame,
 } from '@/lib/library'
 import { cn } from '@/lib/utils'
+import { VersionsList, type GetOurs } from '@/library/Versions'
 
-type Tab = 'general' | 'compat' | 'files' | 'kryoto'
+type Tab = 'general' | 'compat' | 'files' | 'versions' | 'kryoto'
 
 const TABS = [
   ['general', 'General'],
   ...(isWindowsHost() ? [] : ([['compat', 'Compatibility']] as const)),
   ['files', 'Installed files'],
+  ['versions', 'Builds'],
   ['kryoto', 'kryo.to'],
 ] as const as readonly (readonly [Tab, string])[]
 
@@ -34,6 +36,8 @@ const TABS = [
  *                    the exact command it adds up to
  *   Compatibility    Linux only: force a Proton or Wine for this game
  *   Installed files  size, folder, exe, uninstall
+ *   Builds           Steam's Betas: every build on kryo.to, from any of its
+ *                    sources, and keeping the installed one over updates
  *   kryo.to          the page it is linked to, refreshed from there
  * Edits a draft; Save writes it, closing is always cancel.
  */
@@ -42,12 +46,15 @@ export function GameProperties({
   startTab = 'general',
   onSaved,
   onUninstall,
+  onOurs,
   onClose,
 }: {
   game: LibraryGame
   startTab?: Tab
   onSaved: (game: LibraryGame) => void
   onUninstall: () => void
+  /** Our own copy of a build, through the Store's sheet. */
+  onOurs: GetOurs
   onClose: () => void
 }) {
   const [tab, setTab] = useState<Tab>(startTab)
@@ -283,6 +290,30 @@ export function GameProperties({
               </Button>
             </Section>
           </>
+        ) : null}
+
+        {tab === 'versions' ? (
+          draft.slug ? (
+            <Section title="Builds" hint="Every build kryo.to has of this game. Install any of them from our copy or one of its mirrors.">
+              <VersionsList
+                slug={draft.slug}
+                title={draft.title}
+                installed={draft.version}
+                pinned={draft.pinnedVersion ?? null}
+                onPin={(v) => set('pinnedVersion', v)}
+                onOurs={(id) => {
+                  onClose()
+                  onOurs(id)
+                }}
+                onError={setError}
+                onStarted={onClose}
+              />
+            </Section>
+          ) : (
+            <Section title="Builds" hint="Link this game to its kryo.to page (the kryo.to tab) to see its builds." >
+              <Button className="w-fit" onClick={() => setTab('kryoto')}>Link it</Button>
+            </Section>
+          )
         ) : null}
 
         {tab === 'kryoto' ? (

@@ -235,7 +235,7 @@ pub fn set_account(account: Option<String>) {
 }
 
 /// The last `lines` lines of the log, for Settings > Logs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn logs_tail(lines: usize) -> String {
     let Some(l) = LOGGER.get() else { return String::new() };
     let text = std::fs::read_to_string(log_path(&l.dir)).unwrap_or_default();
@@ -243,7 +243,7 @@ pub fn logs_tail(lines: usize) -> String {
     all[all.len().saturating_sub(lines.clamp(1, 2000))..].join("\n")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn logs_folder() -> String {
     LOGGER.get().map(|l| l.dir.to_string_lossy().into_owned()).unwrap_or_default()
 }

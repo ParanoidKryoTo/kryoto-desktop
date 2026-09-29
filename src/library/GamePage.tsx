@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, Download, FolderOpen, Glasses, Globe, Play, Settings2, Square, X } from 'lucide-react'
 import { Button, Caption, Card, CommandLine, IconButton, Label, MenuList, useDismiss, type MenuEntry } from '@/ui'
-import { entryIsVr, entryLabel, fetchCatalogGame, hasChoice, library, logoFor, playTarget, type LibraryGame } from '@/lib/library'
+import { entryIsVr, entryLabel, fetchCatalogGame, hasChoice, library, playTarget, type CatalogGame, type LibraryGame } from '@/lib/library'
+import { useOnline } from '@/lib/online'
+import { GameBanner } from '@/library/Art'
 import { formatLastPlayed, formatPlaytime } from '@/lib/format'
 import { errorText } from '@/lib/bridge'
 import { cn } from '@/lib/utils'
-import { adultBlur, useShowAdult } from '@/lib/adult'
 import { AddonsCard } from '@/library/AddonsCard'
 import { STATUSES, STATUS_LABEL, type SavedStatus } from '@/hooks/useSaved'
 
@@ -47,9 +48,6 @@ export function GamePage({
   onSetStatus?: (status: SavedStatus | null) => void
   onGameChanged?: (g: LibraryGame) => void
 }) {
-  const [heroFailed, setHeroFailed] = useState(false)
-  const showAdult = useShowAdult()
-  const [logoFailed, setLogoFailed] = useState(false)
   const [latest, setLatest] = useState<string | null>(null)
   const [command, setCommand] = useState<string>('')
   const [modesOpen, setModesOpen] = useState(false)
@@ -62,17 +60,36 @@ export function GamePage({
   useDismiss(gearOpen, gearRef, () => setGearOpen(false))
   useDismiss(statusOpen, statusRef, () => setStatusOpen(false))
 
+  // What kryo.to says about it now: a newer build, and its current art (the
+  // real banner and logo). New art is saved with the game, so it shows
+  // straight away next time, and offline.
+  const [catalog, setCatalog] = useState<CatalogGame | null>(null)
+  const [asked, setAsked] = useState(false)
+  const online = useOnline()
   useEffect(() => {
+    setCatalog(null)
     setLatest(null)
-    if (!game.slug || !game.version) return
+    setAsked(false)
+    if (!game.slug || !online) return setAsked(true)
     let cancelled = false
     fetchCatalogGame(game.slug)
-      .then((c) => !cancelled && setLatest(c.version))
+      .then((c) => {
+        if (cancelled) return
+        setCatalog(c)
+        setLatest(c.version)
+        const art = { hero: c.hero, logo: c.logo, header: c.header, cover: game.cover ?? c.cover }
+        if (art.hero !== game.hero || art.logo !== (game.logo ?? null) || art.header !== (game.header ?? null) || art.cover !== game.cover) {
+          void library.save({ ...game, ...art }).then((g) => onGameChanged?.(g)).catch(() => {})
+        }
+      })
       .catch(() => {})
+      .finally(() => !cancelled && setAsked(true))
     return () => {
       cancelled = true
     }
-  }, [game.slug, game.version])
+    // Once per game and connection: saving the art must not fetch again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.slug, online])
 
   const target = playTarget(game)
   const previewEntry = typeof target === 'number' ? target : game.entries.length ? 0 : null
@@ -84,39 +101,21 @@ export function GamePage({
   }, [game, previewEntry])
 
   const choice = hasChoice(game)
-  const hero = !heroFailed && game.hero ? game.hero : game.cover
-  const logo = logoFailed ? null : logoFor(game)
-  const updateAvailable = !!latest && !!game.version && latest !== game.version
+  // A build kept under Properties > Builds is not offered updates.
+  const kept = !!game.pinnedVersion && game.pinnedVersion === game.version
+  const updateAvailable = !!latest && !!game.version && latest !== game.version && !kept
 
   return (
     <section aria-label={game.title} className="min-h-0 grow overflow-auto">
-      <div className="relative h-80 overflow-hidden">
-        {hero ? (
-          <img
-            src={hero}
-            alt=""
-            onError={() => setHeroFailed(true)}
-            className={cn('absolute inset-0 size-full object-cover object-top', heroFailed && 'scale-110 blur-2xl', adultBlur(game.nsfw, showAdult))}
-          />
-        ) : (
-          <div className="absolute inset-0 bg-card" />
-        )}
-        <div className="hero-fade absolute inset-0" />
-        <div className="absolute inset-x-8 bottom-8">
-          {logo ? (
-            <img
-              src={logo}
-              alt={game.title}
-              onError={() => setLogoFailed(true)}
-              className="max-h-36 max-w-[42%] object-contain drop-shadow-[0_6px_18px_rgba(0,0,0,0.7)]"
-            />
-          ) : (
-            <h1 className="max-w-3xl text-4xl font-bold leading-tight text-foreground drop-shadow-[0_4px_20px_rgba(0,0,0,0.8)]">
-              {game.title}
-            </h1>
-          )}
-        </div>
-      </div>
+      <GameBanner
+        title={game.title}
+        adult={game.nsfw}
+        // Art saved before kryo.to resolved it (no header on record) waits for
+        // the answer, so the banner does not show a guess and then swap.
+        pending={!asked && game.header === undefined}
+        banners={[catalog?.hero ?? game.hero, ...(catalog?.screenshots.slice(0, 1) ?? []), catalog?.header ?? game.header, game.cover]}
+        logo={catalog ? catalog.logo : game.logo}
+      />
 
       <div className="kryo-radius relative z-10 mx-6 -mt-2 flex flex-wrap items-center gap-6 border border-border bg-card/90 p-4 backdrop-blur">
         {running ? (
@@ -310,7 +309,9 @@ export function GamePage({
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
             {game.developer ? <Fact k="Developer" v={game.developer} /> : null}
             {game.source ? <Fact k="Release" v={game.source} /> : null}
-            {game.version ? <Fact k="Build" v={game.version} /> : null}
+            {game.version ? (
+              <Fact k="Build" v={kept ? `${game.version}, kept${latest && latest !== game.version ? ` (current is ${latest})` : ''}` : game.version} />
+            ) : null}
             <Fact k="Folder" v={game.installDir} mono />
             {game.launchOptions ? <Fact k="Options" v={game.launchOptions} mono /> : null}
           </dl>

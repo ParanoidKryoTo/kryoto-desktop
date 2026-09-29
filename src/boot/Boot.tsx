@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { artSrc } from '@/lib/art'
 import { ArrowLeft, Minus, RotateCw, X } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { AsciiBar, Button } from '@/ui'
@@ -154,7 +155,7 @@ export function Welcome({
             ) : account ? (
               <>
                 <Button variant="primary" size="lg" className="w-full gap-3" onClick={onContinue}>
-                  {account.avatarUrl ? <img src={account.avatarUrl} alt="" className="kryo-pill size-6 object-cover" /> : null}
+                  {account.avatarUrl ? <img src={artSrc(account.avatarUrl) ?? undefined} alt="" className="kryo-pill size-6 object-cover" /> : null}
                   <span className="truncate">Continue as {name}</span>
                 </Button>
                 <Button

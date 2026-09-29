@@ -6,7 +6,7 @@ import { installErrorLogging } from './lib/log'
 import { installWindowDrag } from './lib/window-drag'
 import './styles.css'
 
-/** The pop-up menu's web view loads this same page; its label says which it is. */
+/** The menu view (menus.rs) loads this same page; its label says which it is. */
 function windowLabel(): string {
   try {
     const internals = (window as unknown as { __TAURI_INTERNALS__?: { metadata?: { currentWebview?: { label?: string } } } })

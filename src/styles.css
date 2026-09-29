@@ -184,6 +184,13 @@
 .kryo-in { animation: kryo-in var(--kryo-dur-base) var(--kryo-ease-out) both; }
 .kryo-pop { animation: kryo-pop var(--kryo-dur-base) var(--kryo-ease-out) both; }
 .kryo-fade { animation: kryo-fade var(--kryo-dur-fast) ease both; }
+/* Art that is still on its way: a slow sweep, not a stand-in picture. */
+@keyframes kryo-shimmer { from { background-position: 150% 0; } to { background-position: -50% 0; } }
+.kryo-shimmer {
+  background-image: linear-gradient(100deg, transparent 30%, color-mix(in oklch, var(--foreground) 6%, transparent) 50%, transparent 70%);
+  background-size: 200% 100%;
+  animation: kryo-shimmer 1.4s ease-in-out infinite;
+}
 .kryo-toast { animation: kryo-toast 260ms var(--kryo-ease-out) both; }
 .kryo-blink { animation: kryo-blink 1s steps(1) infinite; }
 
@@ -339,9 +346,10 @@
   --sidebar-border: oklch(0.27 0.05 350);
 }
 
-/* The pop-up menu's page is only as tall as its menu. */
+/* The menu's page is only as big as its menu. */
 html[data-window='popup'] #root {
   height: auto;
+  width: max-content;
 }
 
 /* A real button gives under the pointer, as on kryo.to (its
@@ -376,7 +384,9 @@ html[data-window='popup'],
 html[data-window='popup'] body {
   background: transparent;
 }
-/* Menu rows follow the reader's corners, up to a size that still reads as a row. */
+/* The menu's view is exactly the menu's size, and a web view cannot be
+   see-through over the Store's (its corners came out black), so the menu is
+   square and only its rows follow the reader's corners. */
 html[data-window='popup'] [role='menuitem'] {
-  border-radius: min(var(--kryo-radius), 10px);
+  border-radius: min(var(--kryo-radius), 6px);
 }

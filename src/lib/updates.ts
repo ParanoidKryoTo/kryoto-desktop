@@ -70,8 +70,13 @@ export const updates = {
   },
 
   /** Once per launch, quietly: an unreachable server is not worth a dialog. */
+  /** Once per run, as soon as there is a connection (offline, it waits for one). */
   async checkOnLaunch() {
     if (launchChecked || !isTauri()) return
+    if (!navigator.onLine) {
+      window.addEventListener('online', () => void updates.checkOnLaunch(), { once: true })
+      return
+    }
     launchChecked = true
     await updates.check()
   },

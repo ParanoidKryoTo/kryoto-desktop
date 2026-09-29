@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
-import { isTauri, on } from '@/lib/bridge'
+import { useCallback, useEffect, useState } from 'react'
+import { call, isTauri, on } from '@/lib/bridge'
+import { logError } from '@/lib/log'
 import { notify } from '@/lib/notify'
 
 export type KryoNotification = {
@@ -68,5 +69,12 @@ export function useInbox() {
       stops.forEach((s) => s())
     }
   }, [])
-  return { inbox, news }
+  // Shown as read straight away; the page reports the real list once kryo.to
+  // has it (store_mark_read asks it to look again).
+  const markAllRead = useCallback(() => {
+    const now = new Date().toISOString()
+    setInbox((i) => ({ unreadCount: 0, notifications: i.notifications.map((n) => (n.readAt ? n : { ...n, readAt: now })) }))
+    void call('store_mark_read').catch((e) => logError('inbox', e))
+  }, [])
+  return { inbox, news, markAllRead }
 }
