@@ -45,6 +45,7 @@ import * as nav from '@/lib/history'
 import type { View } from '@/lib/history'
 import { call, errorText, on } from '@/lib/bridge'
 import { logError } from '@/lib/log'
+import { flushPlays, isExpectedReportError, reportPlay } from '@/lib/play-reports'
 import { DISCORD_URL, REDDIT_URL, SOURCE_URL, YOUTUBE_URL } from '@/lib/community'
 import { entryIsVr, entryLabel, library, playTarget, type LibraryGame } from '@/lib/library'
 import { exitApp, isTauri, openExternal, setStoreVisible, signOut, toggleFullscreen } from '@/lib/window'
@@ -267,13 +268,13 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       const slug = gamesRef.current.find((g) => g.id === e.id)?.slug
       if (!slug) return
       // "Playing right now" on kryo.to: on as it starts, off as it closes.
-      void call('store_report_playing', { slug, playing: e.running }).catch((err) => logError('playing', err))
+      void call('store_report_playing', { slug, playing: e.running }).catch((err) =>
+        isExpectedReportError(err) ? undefined : logError('playing', err),
+      )
       if (e.running || !e.seconds || e.seconds < 60) return
       const now = Math.floor(Date.now() / 1000)
       const key = `${e.id.slice(0, 40)}-${now}`.replace(/[^a-zA-Z0-9-]/g, '-')
-      void call('store_report_play', { slug, startedAt: now - e.seconds, seconds: Math.min(e.seconds, 86_400), key }).catch((err) =>
-        logError('playtime', err),
-      )
+      void reportPlay({ slug, startedAt: now - e.seconds, seconds: Math.min(e.seconds, 86_400), key })
     }).then((fn) => (cancelled ? fn() : (stop = fn)))
     return () => {
       cancelled = true
@@ -291,16 +292,22 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       if (!shareRef.current) return
       for (const id of runningRef.current) {
         const slug = gamesRef.current.find((g) => g.id === id)?.slug
-        if (slug) void call('store_report_playing', { slug, playing: true }).catch((err) => logError('playing', err))
+        if (slug) {
+          void call('store_report_playing', { slug, playing: true }).catch((err) =>
+            isExpectedReportError(err) ? undefined : logError('playing', err),
+          )
+        }
       }
+      // Sessions that ended while kryo.to was not open go now.
+      void flushPlays()
     }, 4 * 60_000)
     return () => window.clearInterval(t)
   }, [])
 
   // What the library reports as an error goes in the log too.
   useEffect(() => {
-    if (lib.error) logError('library', lib.error)
-  }, [lib.error])
+    if (lib.error && !lib.errorQuiet) logError('library', lib.error)
+  }, [lib.error, lib.errorQuiet])
 
   const gameById = (id: string) => lib.games.find((g) => g.id === id) ?? null
 

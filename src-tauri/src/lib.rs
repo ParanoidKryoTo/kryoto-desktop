@@ -2,6 +2,7 @@ mod addons;
 mod art;
 mod compat;
 mod downloads;
+mod handoff;
 mod launch;
 mod library;
 mod links;

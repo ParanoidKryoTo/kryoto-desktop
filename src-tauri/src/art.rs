@@ -82,12 +82,47 @@ fn client() -> &'static reqwest::Client {
 }
 
 /// Log a failed address once per run.
+///
+/// A warning, not a report to kryo.to. Art that is missing (Steam moved a
+/// game's images to hashed addresses and the old ones answer 404) or that
+/// could not be fetched (no connection) is expected, has a fallback in every
+/// place that draws it, and made up most of what the reports carried - so the
+/// failures worth reading were buried under thousands of these.
 fn report(url: &str, why: &str) {
     static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
     let Ok(mut seen) = SEEN.lock() else { return };
     if seen.get_or_insert_with(HashSet::new).insert(url.to_string()) {
-        crate::logging::error("art", &format!("{url}: {why}"));
+        crate::logging::warn("art", &format!("{url}: {why}"));
     }
+}
+
+/// `(appid, file)` for a legacy Steam CDN address
+/// (`.../steam/apps/<appid>/header.jpg`), the shape that answers 404 for games
+/// whose art Steam now keeps only at hashed addresses.
+fn legacy_steam(url: &str) -> Option<(String, String)> {
+    let re = regex::Regex::new(r"steamstatic\.com/steam/apps/(\d+)/([a-z0-9_]+\.jpg)").ok()?;
+    let caps = re.captures(url)?;
+    Some((caps[1].to_string(), caps[2].to_string()))
+}
+
+/// Where Steam keeps that image now, from its own store API. Only the header
+/// and capsule have a field there; anything else stays missing, and the
+/// window falls back to the next picture it was given.
+async fn current_steam_address(appid: &str, file: &str) -> Option<String> {
+    let field = match file {
+        "header.jpg" => "header_image",
+        "capsule_231x87.jpg" | "capsule_sm_120.jpg" => "capsule_image",
+        "capsule_616x353.jpg" => "capsule_imagev5",
+        _ => return None,
+    };
+    let res = client()
+        .get(format!("https://store.steampowered.com/api/appdetails?appids={appid}&filters=basic"))
+        .send()
+        .await
+        .ok()?;
+    let json: serde_json::Value = res.json().await.ok()?;
+    let url = json.get(appid)?.get("data")?.get(field)?.as_str()?.to_string();
+    (url.starts_with("https://") && legacy_steam(&url).is_none()).then_some(url)
 }
 
 fn respond(status: StatusCode, bytes: Vec<u8>) -> Response<Vec<u8>> {
@@ -107,7 +142,16 @@ pub async fn serve<R: Runtime>(app: AppHandle<R>, request: Request<Vec<u8>>) -> 
     if let Some(bytes) = file.as_ref().and_then(|f| std::fs::read(f).ok()).filter(|b| !b.is_empty()) {
         return respond(StatusCode::OK, bytes);
     }
-    match fetch(url.as_str()).await {
+    let mut fetched = fetch(url.as_str()).await;
+    if matches!(&fetched, Err(why) if why.contains("404")) {
+        if let Some((appid, file)) = legacy_steam(url.as_str()) {
+            if let Some(now) = current_steam_address(&appid, &file).await {
+                // Kept under the OLD address's key, so the next ask is a disk hit.
+                fetched = fetch(&now).await;
+            }
+        }
+    }
+    match fetched {
         Ok(bytes) => {
             if let Some(f) = &file {
                 let tmp = f.with_extension("part");

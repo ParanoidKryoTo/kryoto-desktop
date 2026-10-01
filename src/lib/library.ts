@@ -1,4 +1,5 @@
-import { call, on } from '@/lib/bridge'
+import { call, errorText, on } from '@/lib/bridge'
+import { logWarn } from '@/lib/log'
 import { catalogApiUrl } from '@/lib/endpoint'
 
 /**
@@ -204,7 +205,13 @@ export const library = {
   running: () => call<string[]>('game_running'),
   stop: (id: string) => call<void>('game_stop', { id }),
   diskSize: (installDir: string) => call<number>('game_disk_size', { installDir }),
-  openFolder: (path: string) => call<void>('open_folder', { path }),
+  /**
+   * Show a folder. `create` for a library folder that may not exist yet; a
+   * missing game folder shows the nearest one above it. Never rejects: a
+   * folder that cannot be shown is logged, not thrown at the window.
+   */
+  openFolder: (path: string, create = false) =>
+    call<void>('open_folder', { path, create }).catch((e) => logWarn('library', `open folder: ${errorText(e)}`)),
   onState: (fn: (e: GameStateEvent) => void) => on<GameStateEvent>('game-state', fn),
   onChanged: (fn: () => void) => on<unknown>('library-changed', fn),
   addonUndo: (gameId: string, file: string) => call<LibraryGame>('addon_undo', { gameId, file }),

@@ -1,3 +1,4 @@
+import { isExpectedReportError } from '@/lib/play-reports'
 import { useCallback, useEffect, useState } from 'react'
 import { call, isTauri, on } from '@/lib/bridge'
 import { logError } from '@/lib/log'
@@ -74,7 +75,7 @@ export function useInbox() {
   const markAllRead = useCallback(() => {
     const now = new Date().toISOString()
     setInbox((i) => ({ unreadCount: 0, notifications: i.notifications.map((n) => (n.readAt ? n : { ...n, readAt: now })) }))
-    void call('store_mark_read').catch((e) => logError('inbox', e))
+    void call('store_mark_read').catch((e) => (isExpectedReportError(e) ? undefined : logError('inbox', e)))
   }, [])
   return { inbox, news, markAllRead }
 }

@@ -353,6 +353,30 @@ pub fn file_name_in_link(url: &str) -> Option<String> {
     json["n"].as_str().map(str::trim).filter(|n| !n.is_empty() && n.len() <= 255).map(String::from)
 }
 
+/// The address family a `/d/<token>` link is bound to, as a local address to
+/// connect from: `0.0.0.0` for an IPv4 binding, `::` for IPv6.
+///
+/// dl.kryo.to binds a link to the network that asked for it (`/24` or `/64`),
+/// and the page asked through the WebView. On a PC with both IPv4 and IPv6
+/// the WebView and this downloader can each pick a different one, and the
+/// link was then refused as "made for another network" (88 reports in 0.2.3).
+/// Connecting over the same family as the binding makes the two agree.
+pub fn link_family(url: &str) -> Option<std::net::IpAddr> {
+    let url: url::Url = url.parse().ok()?;
+    let mut parts = url.path_segments()?;
+    if parts.next()? != "d" {
+        return None;
+    }
+    let body = parts.next()?.split('.').next()?;
+    let json: serde_json::Value = serde_json::from_slice(&base64url(body)?).ok()?;
+    let ip = json["ip"].as_str()?;
+    Some(if ip.contains(':') {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    } else {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    })
+}
+
 /// Decode unpadded base64url. `None` for anything that is not.
 fn base64url(text: &str) -> Option<Vec<u8>> {
     let value = |c: u8| -> Option<u32> {
@@ -464,7 +488,15 @@ fn start<R: Runtime>(app: AppHandle<R>, id: String) {
         match result {
             Ok(()) => {}
             Err(e) => {
-                crate::logging::error("download", &format!("{id}: {e}"));
+                let e = explain_os_error(e);
+                // A full disk is the player's to fix and the message says how:
+                // in this PC's log, not in the reports to kryo.to, where it was
+                // a third of everything sent.
+                if e.starts_with("Not enough space") {
+                    crate::logging::warn("download", &format!("{id}: {e}"));
+                } else {
+                    crate::logging::error("download", &format!("{id}: {e}"));
+                }
                 set_status(&app, &id, Status::Failed, Some(e))
             }
         }
@@ -707,6 +739,21 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
     if !already_complete {
         let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
         let (mut client, mut connections) = (client.clone(), settings.connections);
+        // Our own link: connect over the address family it was bound to.
+        if !is_mirror {
+            let family = edit(app, id, |_| {}).and_then(|d| link_family(&d.url));
+            if let Some(local) = family {
+                if let Ok(bound) = reqwest::Client::builder()
+                    .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+                    .tcp_nodelay(true)
+                    .pool_max_idle_per_host(64)
+                    .local_address(local)
+                    .build()
+                {
+                    client = bound;
+                }
+            }
+        }
         if is_mirror {
             match mirror_client(app, id, flag, false, settings.connections).await {
                 Ok(v) => (client, connections) = v,
@@ -915,6 +962,21 @@ fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> 
         set_status(app, id, Status::Paused, None);
     }
     Ok(())
+}
+
+/// Windows' error text, said in terms of what the player can do about it.
+fn explain_os_error(e: String) -> String {
+    if e.contains("os error 225") {
+        return format!(
+            "{e}\n\nWindows Security blocked a file in this game as a threat. Game cracks and emulators are often flagged. Allow it under Windows Security > Virus & threat protection > Protection history, or add the library folder as an exclusion, then press Retry."
+        );
+    }
+    if e.contains("os error 5)") && e.starts_with("Installing into") {
+        return format!(
+            "{e}\n\nWindows would not let Kryoto write there. Usually it is antivirus holding a file it is scanning, or a folder that needs administrator rights. Wait a moment and press Retry, or pick another library folder in Settings > Storage."
+        );
+    }
+    e
 }
 
 enum Transfer {
@@ -1414,6 +1476,14 @@ async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate::set
         crate::storage::check_room(&parent, size, &title)?;
     }
 
+    // Real 7-Zip on hand before unpacking a .7z: the built-in unpacker cannot
+    // read every filter (the ARM64 one is "UnsupportedCompressionMethod([10])")
+    // and Windows' own tar.exe has no LZMA at all.
+    #[cfg(windows)]
+    if archive.extension().is_some_and(|e| e.eq_ignore_ascii_case("7z")) {
+        ensure_7zr(app).await;
+    }
+
     let progress_app = app.clone();
     let progress_id = id.to_string();
     let (dest_clone, staging_clone) = (dest.clone(), staging.clone());
@@ -1674,11 +1744,72 @@ fn extract_7z(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) 
     Ok(())
 }
 
+/// The standalone 7-Zip (`7zr.exe`) this client keeps, once fetched.
+#[cfg(windows)]
+static SEVEN_ZR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Fetch 7-Zip's official standalone console once, into the app's data folder.
+/// Best effort: without it the unpack falls back to tar.exe as before.
+#[cfg(windows)]
+async fn ensure_7zr<R: Runtime>(app: &AppHandle<R>) {
+    if SEVEN_ZR.get().is_some() {
+        return;
+    }
+    let Ok(dir) = app.path().app_data_dir().map(|d| d.join("tools")) else { return };
+    let file = dir.join("7zr.exe");
+    if file.metadata().map(|m| m.len() > 100_000).unwrap_or(false) {
+        let _ = SEVEN_ZR.set(file);
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let fetched = async {
+        let res = reqwest::Client::builder()
+            .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .ok()?
+            .get("https://www.7-zip.org/a/7zr.exe")
+            .send()
+            .await
+            .ok()?;
+        if !res.status().is_success() {
+            return None;
+        }
+        let bytes = res.bytes().await.ok()?;
+        (bytes.len() > 100_000 && bytes.starts_with(b"MZ")).then_some(bytes)
+    }
+    .await;
+    match fetched {
+        Some(bytes) => {
+            let tmp = file.with_extension("part");
+            if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, &file).is_ok() {
+                let _ = SEVEN_ZR.set(file);
+            }
+        }
+        None => crate::logging::warn("install", "could not fetch 7zr.exe; unpacking with tar.exe"),
+    }
+}
+
 fn extract_with_tar(archive: &Path, dest: &Path) -> Result<Vec<String>, String> {
+    // 7-Zip first - an installed one, else the standalone this client keeps -
+    // and tar.exe last: it reads zip and rar, but not LZMA, which is most .7z.
     #[cfg(windows)]
     let candidates: Vec<(PathBuf, Vec<String>)> = {
         let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-        vec![(PathBuf::from(system).join(r"System32\tar.exe"), vec![])]
+        let mut list: Vec<(PathBuf, Vec<String>)> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+            .iter()
+            .filter_map(|v| std::env::var(v).ok())
+            .map(|root| PathBuf::from(root).join(r"7-Zip\7z.exe"))
+            .filter(|p| p.is_file())
+            .map(|p| (p, vec!["7z".to_string()]))
+            .collect();
+        // ProgramFiles and ProgramW6432 are usually the same folder.
+        list.dedup_by(|a, b| a.0 == b.0);
+        if let Some(zr) = SEVEN_ZR.get().filter(|p| p.is_file()) {
+            list.push((zr.clone(), vec!["7z".to_string()]));
+        }
+        list.push((PathBuf::from(system).join(r"System32\tar.exe"), vec![]));
+        list
     };
     // GNU tar cannot read 7z, so on Linux libarchive's bsdtar comes first,
     // then 7-Zip under each of the names distributions give it.
@@ -1977,6 +2108,20 @@ mod tests {
         assert_eq!(file_name_in_link("https://dl.kryo.to/x/abc"), None);
         assert_eq!(file_name_in_link("https://dl.kryo.to/d/%%%"), None);
         assert_eq!(base64url("aGk").as_deref(), Some(&b"hi"[..]));
+    }
+
+    /// The family the link is bound to, so the download connects over it.
+    #[test]
+    fn the_link_says_which_network_it_is_for() {
+        // A real 0.2.3 report's link: bound to 113.203.49.0/24.
+        let v4 = "https://dl.kryo.to/d/eyJrIjoiMnQvMnRWNFJOM2FmNkxNME43eS43eiIsImV4cCI6MTc5MDgxNzQ5NywibiI6IkJhbGR1cidzIEdhdGUgMy43eiIsImlwIjoiMTEzLjIwMy40OS4wLzI0In0.sig";
+        assert_eq!(link_family(v4), Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)));
+        // And one bound to 2a04:4a43:953f:fc03::/64.
+        let v6 = "https://dl.kryo.to/d/eyJrIjoiamovSkprdWY4VmlXejkwTzFaRS43eiIsImV4cCI6MTc5MDc4NzE1NywibiI6IkRBUksgU09VTFMgSUkgLSBLcnlvdG8uN3oiLCJpcCI6IjJhMDQ6NGE0Mzo5NTNmOmZjMDM6Oi82NCJ9.sig";
+        assert_eq!(link_family(v6), Some(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)));
+        // No binding (a mirror or preview link): nothing to match.
+        let none = "https://dl.kryo.to/d/eyJrIjoiYS9iIiwiZXhwIjoxLCJuIjoiSGFkZXMgSUkgLSBLcnlvdG8uN3oifQ.c2ln";
+        assert_eq!(link_family(none), None);
     }
 
     #[test]
