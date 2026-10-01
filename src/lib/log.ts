@@ -15,6 +15,15 @@ export function logError(scope: string, e: unknown) {
   void call('log_write', { level: 'error', scope, message }).catch(() => {})
 }
 
+/** Written to the log on this PC only: expected trouble that has a fallback. */
+export function logWarn(scope: string, message: string) {
+  if (!isTauri()) {
+    console.warn(`[${scope}]`, message)
+    return
+  }
+  void call('log_write', { level: 'warn', scope, message }).catch(() => {})
+}
+
 export function logInfo(scope: string, message: string) {
   if (isTauri()) void call('log_write', { level: 'info', scope, message }).catch(() => {})
 }

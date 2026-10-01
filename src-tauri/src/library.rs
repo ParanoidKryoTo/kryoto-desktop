@@ -369,12 +369,51 @@ pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entr
         return Err("It is already running.".into());
     }
     let game = load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
-    let plan = plan_for(&app, &game, entry)?;
+    let mut plan = plan_for(&app, &game, entry)?;
     if !plan.exe.is_file() {
-        return Err(format!(
-            "{} is not there any more. Point Properties at the game's .exe.",
-            plan.exe.display()
-        ));
+        // The exe moved inside the folder (an update re-laid it out, or the
+        // archive unpacked one level deeper than the release says). Look for a
+        // file of the same name before giving up, and keep what was found.
+        let found = plan
+            .exe
+            .file_name()
+            .and_then(|name| find_by_name(Path::new(&game.install_dir), name, 5));
+        let Some(found) = found else {
+            return Err(format!(
+                "{} is not there any more. Point Properties at the game's .exe.",
+                plan.exe.display()
+            ));
+        };
+        let old = plan.exe.to_string_lossy().into_owned();
+        if plan.program == plan.exe {
+            plan.program = found.clone();
+        }
+        for arg in plan.lead_args.iter_mut() {
+            if *arg == old {
+                *arg = found.to_string_lossy().into_owned();
+            }
+        }
+        if !plan.cwd.is_dir() || plan.exe.parent() == Some(plan.cwd.as_path()) {
+            plan.cwd = found.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(&game.install_dir));
+        }
+        if entry.is_none() {
+            if let Ok(rel) = found.strip_prefix(&game.install_dir) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                let _ = update(&app, |games| {
+                    if let Some(g) = games.iter_mut().find(|g| g.id == id) {
+                        g.executable = rel.clone();
+                    }
+                    Ok(())
+                });
+            }
+        }
+        crate::logging::info("library", &format!("{old} was gone; found it at {}", found.display()));
+        plan.exe = found;
+    }
+    // A working folder that is not there (os error 267, "The directory name is
+    // invalid") would refuse the start outright: the exe's own folder instead.
+    if !plan.cwd.is_dir() {
+        plan.cwd = plan.exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(&game.install_dir));
     }
     if let Some(prefix) = plan.env.iter().find(|(k, _)| k == "WINEPREFIX" || k == "STEAM_COMPAT_DATA_PATH") {
         let _ = std::fs::create_dir_all(&prefix.1);
@@ -387,9 +426,18 @@ pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entr
         // Its own process group, so Stop takes Wine and everything it started.
         cmd.process_group(0);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Could not start {}: {e}", plan.program.display()))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        // ERROR_ELEVATION_REQUIRED: the exe's manifest asks for administrator
+        // rights, which a plain start cannot give. Ask Windows to elevate it
+        // (the UAC prompt), through PowerShell so there is still a process to
+        // wait on for "Playing" and the playtime.
+        #[cfg(windows)]
+        Err(e) if e.raw_os_error() == Some(740) => elevated(&plan)
+            .spawn()
+            .map_err(|e| format!("Could not start {} as administrator: {e}", plan.program.display()))?,
+        Err(e) => return Err(format!("Could not start {}: {e}", plan.program.display())),
+    };
     let pid = child.id();
     running.0.lock().map_err(|_| "state lock poisoned")?.insert(id.clone(), pid);
     let started = now();
@@ -406,8 +454,25 @@ pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entr
         }
     }
 
+    let install_dir = PathBuf::from(&game.install_dir);
     std::thread::spawn(move || {
         let status = child.wait().ok();
+        let mut code = status.and_then(|s| s.code());
+        // A quick exit is often a hand-over (a launcher, a game restarting
+        // itself), not a crash: follow the process now running from the game's
+        // folder, so Stop, "Playing" and the playtime all carry on with it.
+        if now().saturating_sub(started) < crate::handoff::HANDOFF_WITHIN_SECS {
+            if let Some(next) = crate::handoff::look_for(&install_dir, pid) {
+                if let Some(state) = app.try_state::<Running>() {
+                    if let Ok(mut m) = state.0.lock() {
+                        m.insert(id.clone(), next);
+                    }
+                }
+                crate::logging::info("library", &format!("{id}: followed the game to process {next}"));
+                crate::handoff::wait_gone(next);
+                code = None;
+            }
+        }
         let seconds = now().saturating_sub(started);
         if let Some(state) = app.try_state::<Running>() {
             if let Ok(mut m) = state.0.lock() {
@@ -422,10 +487,62 @@ pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entr
         });
         let _ = app.emit(
             "game-state",
-            GameEvent { id, running: false, seconds: Some(seconds), code: status.and_then(|s| s.code()) },
+            GameEvent { id, running: false, seconds: Some(seconds), code },
         );
     });
     Ok(())
+}
+
+/// The first file called `name` under `dir`, shallowest first, at most `depth` deep.
+fn find_by_name(dir: &Path, name: &std::ffi::OsStr, depth: usize) -> Option<PathBuf> {
+    let mut level = vec![dir.to_path_buf()];
+    for _ in 0..=depth {
+        let mut next = Vec::new();
+        for d in level {
+            let Ok(read) = std::fs::read_dir(&d) else { continue };
+            for e in read.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    next.push(path);
+                } else if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name.to_string_lossy()))
+                {
+                    return Some(path);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    None
+}
+
+/// PowerShell's `Start-Process -Verb RunAs`, waiting for the game to end.
+#[cfg(windows)]
+fn elevated(plan: &launch::LaunchPlan) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let mut script = format!(
+        "Start-Process -Verb RunAs -Wait -FilePath {} -WorkingDirectory {}",
+        quote(&plan.program.to_string_lossy()),
+        quote(&plan.cwd.to_string_lossy()),
+    );
+    let args: Vec<String> = plan
+        .lead_args
+        .iter()
+        .cloned()
+        .chain((!plan.game_args.trim().is_empty()).then(|| plan.game_args.clone()))
+        .collect();
+    if !args.is_empty() {
+        script.push_str(&format!(" -ArgumentList {}", quote(&args.join(" "))));
+    }
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
 }
 
 /// Close a running game and everything it started.
@@ -452,12 +569,25 @@ pub fn game_stop(running: State<'_, Running>, id: String) -> Result<(), String> 
     Ok(())
 }
 
-/// Show the game's folder in the file manager.
+/// Show a folder in the file manager.
+///
+/// Never fails on a folder that is not there. "C:\\Users\\...\\Kryoto Games is
+/// not a folder" was one of the most reported errors: a library folder that
+/// had never been created yet (nothing installed into it), or a game folder
+/// somebody deleted by hand, and the press threw instead of showing anything.
+/// `create` makes the folder (a library folder, which is meant to exist);
+/// otherwise the nearest folder above it that does exist is shown.
 #[tauri::command(async)]
-pub fn open_folder(path: String) -> Result<(), String> {
-    let dir = PathBuf::from(&path);
-    if !dir.is_dir() {
-        return Err(format!("{path} is not a folder."));
+pub fn open_folder(path: String, create: Option<bool>) -> Result<(), String> {
+    let mut dir = PathBuf::from(&path);
+    if !dir.is_dir() && create.unwrap_or(false) && !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    while !dir.is_dir() {
+        match dir.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => dir = parent.to_path_buf(),
+            _ => return Err(format!("{path} is not there any more.")),
+        }
     }
     #[cfg(windows)]
     let program = "explorer";

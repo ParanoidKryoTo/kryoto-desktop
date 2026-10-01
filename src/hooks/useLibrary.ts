@@ -11,7 +11,16 @@ export function useLibrary() {
   const [games, setGames] = useState<LibraryGame[]>([])
   const [running, setRunning] = useState<Set<string>>(new Set())
   const [loaded, setLoaded] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setErrorState] = useState<string | null>(null)
+  /**
+   * The current error is an expected outcome to tell the player, not a fault
+   * to report to kryo.to (Shell logs the rest).
+   */
+  const [errorQuiet, setErrorQuiet] = useState(false)
+  const setError = useCallback((message: string | null, quiet = false) => {
+    setErrorState(message)
+    setErrorQuiet(quiet)
+  }, [])
 
   const reload = useCallback(async () => {
     try {
@@ -59,9 +68,8 @@ export function useLibrary() {
           // A game gone within seconds almost never ran - say so instead of
           // leaving a Play button that silently did nothing.
           if ((event.seconds ?? 0) < 5) {
-            setError(
-              `It closed again straight away${event.code != null ? ` (exit code ${event.code})` : ''}. Check the launch options and the exe in Properties.`,
-            )
+            const [message, quiet] = quickExit(event.code)
+            setError(message, quiet)
           }
         }
       })
@@ -104,7 +112,40 @@ export function useLibrary() {
 
   const drop = useCallback((id: string) => setGames((list) => list.filter((g) => g.id !== id)), [])
 
-  return { games, running, loaded, error, setError, reload, play, stop: stopGame, upsert, drop }
+  return { games, running, loaded, error, errorQuiet, setError, reload, play, stop: stopGame, upsert, drop }
+}
+
+/**
+ * What to say when a game was gone within seconds, and whether that is worth
+ * reporting. The client already follows a launcher that hands over to the real
+ * game (handoff.rs), so reaching this means nothing from the game's folder was
+ * running afterwards either.
+ */
+function quickExit(code: number | null | undefined): [string, boolean] {
+  // 0x80131700: the .NET runtime could not start, so it is missing.
+  if (code === -2146232576) {
+    return [
+      'It closed straight away because the .NET Framework it needs is not installed. Install .NET Framework 4.8 (and 3.5 for older games) from Microsoft, then press Play again.',
+      true,
+    ]
+  }
+  // 0xC0000135: a DLL it needs is missing, almost always a Visual C++ runtime.
+  if (code === -1073741515) {
+    return [
+      'It closed straight away because a DLL it needs is missing. Install the Visual C++ Redistributables (2015-2022, x64 and x86) and the DirectX runtime, then press Play again.',
+      true,
+    ]
+  }
+  if (code === 0 || code == null) {
+    return [
+      'It started and closed again without an error. If no window opened, pick the game\'s own .exe (not a launcher) in Properties.',
+      true,
+    ]
+  }
+  return [
+    `It closed again straight away (exit code ${code}). Check the launch options and the exe in Properties.`,
+    false,
+  ]
 }
 
 export type LibraryState = ReturnType<typeof useLibrary>

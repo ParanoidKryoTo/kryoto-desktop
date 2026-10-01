@@ -75,7 +75,11 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
   }, [load])
   useEffect(() => {
     let stop: (() => void) | undefined
-    void on<MoveProgress>('storage-move', (p) => setMoving(p.done ? null : p)).then((fn) => (stop = fn))
+    void on<MoveProgress>('storage-move', (p) => {
+      setMoving(p.done ? null : p)
+      // A finished move can still carry a note: the old folder was left behind.
+      if (p.done && p.error) setError(p.error)
+    }).then((fn) => (stop = fn))
     return () => stop?.()
   }, [])
 
@@ -174,7 +178,7 @@ export function StoragePane({ onChanged }: { onChanged: () => void }) {
                     Make default
                   </Button>
                 ) : null}
-                <IconButton label="Open folder" className="size-7" onClick={() => void library.openFolder(folder.path)}>
+                <IconButton label="Open folder" className="size-7" onClick={() => void library.openFolder(folder.path, true)}>
                   <FolderOpen className="size-3.5" />
                 </IconButton>
                 {!folder.isDefault ? (

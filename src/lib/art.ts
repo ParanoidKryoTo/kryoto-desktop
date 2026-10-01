@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { isTauri } from '@/lib/bridge'
-import { logError } from '@/lib/log'
+import { logWarn } from '@/lib/log'
 import { isOnline } from '@/lib/online'
 
 /**
@@ -21,11 +21,15 @@ export function artSrc(url: string | null | undefined): string | null {
 const failed = new Set<string>()
 const loaded = new Set<string>()
 
-/** Say once that an image did not load, with its address (not when offline: that is expected). */
+/**
+ * Say once that an image did not load, with its address (not when offline:
+ * that is expected). A warning on this PC, not a report: art.rs has already
+ * said why, and every place that draws art has a fallback.
+ */
 export function reportArt(url: string, where: string) {
   if (failed.has(url)) return
   failed.add(url)
-  if (isOnline()) logError('art', `${where}: ${url} did not load`)
+  if (isOnline()) logWarn('art', `${where}: ${url} did not load`)
 }
 
 function probe(src: string): Promise<boolean> {
@@ -70,9 +74,11 @@ export function useArt(candidates: (string | null | undefined)[], where: string)
           if (!cancelled) setState({ src, status: 'ready' })
           return
         }
-        reportArt(url, where)
         if (cancelled) return
       }
+      // Only when NONE of them loaded: a missing hero with a header that
+      // drew fine is the fallback working, not a failure.
+      if (list[0]) reportArt(list[0], where)
       if (!cancelled) setState({ src: null, status: 'none' })
     })()
     return () => {

@@ -49,7 +49,7 @@ export function LogsPane({ sendReports, onSendReports }: { sendReports: boolean;
           )}
         </pre>
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={() => void library.openFolder(folder)} disabled={!folder}>
+          <Button size="sm" onClick={() => void library.openFolder(folder, true)} disabled={!folder}>
             <FolderOpen className="size-3" />
             Open log folder
           </Button>

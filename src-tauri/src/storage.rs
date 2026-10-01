@@ -331,11 +331,11 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
     let progress_app = app.clone();
     let pid = id.to_string();
     let (from_c, dest_c) = (from.clone(), dest.clone());
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    let leftover = tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
         std::fs::create_dir_all(dest_c.parent().unwrap_or(&dest_c)).map_err(|e| e.to_string())?;
         // Same drive: a rename, done at once.
         if std::fs::rename(&from_c, &dest_c).is_ok() {
-            return Ok(());
+            return Ok(None);
         }
         let mut copied = 0u64;
         let mut last = std::time::Instant::now();
@@ -354,10 +354,35 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
             let _ = std::fs::remove_dir_all(&dest_c);
             return Err(format!("Copying failed, nothing was moved: {e}"));
         }
-        std::fs::remove_dir_all(&from_c).map_err(|e| format!("Copied, but the old folder could not be removed: {e}"))
+        // The copy is complete, so the game now lives at the new place whatever
+        // happens next. A file in the old folder can still be held open for a
+        // moment (antivirus scanning it, a launcher that has not quit: os error
+        // 32), so the removal is retried; if it still fails, the move counts and
+        // the old folder is left for the player to delete, rather than leaving
+        // the library pointing at a copy it was about to stop using.
+        let mut last = None;
+        for wait in [0u64, 1, 3, 6] {
+            std::thread::sleep(std::time::Duration::from_secs(wait));
+            match std::fs::remove_dir_all(&from_c) {
+                Ok(()) => return Ok(None),
+                Err(e) if !from_c.exists() => {
+                    let _ = e;
+                    return Ok(None);
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        Ok(Some(format!(
+            "Moved. The old folder {} could not be removed ({}): something still has a file in it open. Delete it yourself once that is closed.",
+            from_c.display(),
+            last.map(|e| e.to_string()).unwrap_or_default(),
+        )))
     })
     .await
     .map_err(|e| e.to_string())??;
+    if let Some(note) = &leftover {
+        crate::logging::warn("storage", &format!("moving {id}: {note}"));
+    }
 
     // The install dir may be a folder inside the game's folder; keep that part.
     let rest = PathBuf::from(&game.install_dir)
@@ -372,7 +397,7 @@ async fn move_game<R: Runtime>(app: &AppHandle<R>, id: &str, to: &str) -> Result
         }
         Ok(())
     })?;
-    let _ = app.emit("storage-move", MoveProgress { id: id.to_string(), copied: total, total, done: true, error: None });
+    let _ = app.emit("storage-move", MoveProgress { id: id.to_string(), copied: total, total, done: true, error: leftover });
     let _ = app.emit("library-changed", ());
     Ok(())
 }
