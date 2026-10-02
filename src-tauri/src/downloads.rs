@@ -198,6 +198,8 @@ pub struct Downloads {
     active: Mutex<Option<String>>,
     /// Wakes the waiting downloads when the turn frees or the order changes.
     turn: tokio::sync::Notify,
+    /// What the taskbar button last showed (`taskbar_state`).
+    taskbar: Mutex<Option<(u8, u64)>>,
     last_emit: Mutex<Option<Instant>>,
     /// What each mirror download resolved to. Not saved: cookies and signed
     /// addresses go stale, so a download resumed after a restart asks again.
@@ -211,6 +213,7 @@ impl Downloads {
             controls: Mutex::new(HashMap::new()),
             active: Mutex::new(None),
             turn: tokio::sync::Notify::new(),
+            taskbar: Mutex::new(None),
             last_emit: Mutex::new(None),
             resolved: Mutex::new(HashMap::new()),
         }
@@ -247,7 +250,66 @@ fn emit<R: Runtime>(app: &AppHandle<R>, force: bool) {
         }
     }
     let list = state.list.lock().map(|l| l.clone()).unwrap_or_default();
+    show_on_taskbar(app, &list);
     let _ = app.emit("downloads", list);
+}
+
+/// What the taskbar button shows for the downloads: (status, percent).
+/// 0 none, 1 normal, 2 waiting, 3 paused - as Steam does on its icon.
+pub fn taskbar_state(list: &[Download]) -> (u8, u64) {
+    let working = list.iter().find(|d| {
+        matches!(d.status, Status::Resolving | Status::Downloading | Status::Verifying | Status::Extracting)
+    });
+    if let Some(d) = working {
+        return (1, (overall_progress(d) * 100.0).round().clamp(0.0, 100.0) as u64);
+    }
+    if list.iter().any(|d| d.status == Status::Queued) {
+        return (2, 0);
+    }
+    if let Some(d) = list.iter().find(|d| d.status == Status::Paused) {
+        return (3, (overall_progress(d) * 100.0).round().clamp(0.0, 100.0) as u64);
+    }
+    (0, 0)
+}
+
+/// The same split the Downloads page draws: fetching to 85%, checking to 90%,
+/// unpacking the rest.
+fn overall_progress(d: &Download) -> f64 {
+    let part = d.extract_total.filter(|t| *t > 0).map(|t| (d.extracted as f64 / t as f64).min(1.0)).unwrap_or(0.0);
+    match d.status {
+        Status::Verifying => 0.85 + 0.05 * part,
+        Status::Extracting => {
+            if d.extract_total.is_some() {
+                0.9 + 0.1 * part
+            } else {
+                0.95
+            }
+        }
+        _ => d.total.filter(|t| *t > 0).map(|t| (d.received as f64 / t as f64).min(1.0) * 0.85).unwrap_or(0.0),
+    }
+}
+
+/// Progress on the app's taskbar button, so a download can be watched with
+/// the window minimised or behind a game. Only sent when it changes.
+fn show_on_taskbar<R: Runtime>(app: &AppHandle<R>, list: &[Download]) {
+    use tauri::window::{ProgressBarState, ProgressBarStatus};
+    let next = taskbar_state(list);
+    let state = app.state::<Downloads>();
+    if let Ok(mut last) = state.taskbar.lock() {
+        if *last == Some(next) {
+            return;
+        }
+        *last = Some(next);
+    }
+    let Some(window) = app.get_window("main") else { return };
+    let status = match next.0 {
+        1 => ProgressBarStatus::Normal,
+        2 => ProgressBarStatus::Indeterminate,
+        3 => ProgressBarStatus::Paused,
+        _ => ProgressBarStatus::None,
+    };
+    let progress = (next.0 == 1 || next.0 == 3).then_some(next.1);
+    let _ = window.set_progress_bar(ProgressBarState { status: Some(status), progress });
 }
 
 fn edit<R: Runtime>(app: &AppHandle<R>, id: &str, f: impl FnOnce(&mut Download)) -> Option<Download> {
@@ -2191,6 +2253,18 @@ pub fn download_remove(app: AppHandle, state: State<'_, Downloads>, id: String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taskbar_follows_the_download_that_is_running() {
+        let mut d = Download { status: Status::Downloading, total: Some(1000), received: 500, ..Default::default() };
+        let queued = Download { status: Status::Queued, ..Default::default() };
+        assert_eq!(taskbar_state(&[queued.clone(), d.clone()]), (1, 43));
+        d.status = Status::Paused;
+        assert_eq!(taskbar_state(&[d.clone()]), (3, 43));
+        assert_eq!(taskbar_state(&[queued]), (2, 0));
+        d.status = Status::Installed;
+        assert_eq!(taskbar_state(&[d]), (0, 0));
+    }
 
     #[test]
     fn ranges_cover_the_file_exactly() {
