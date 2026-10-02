@@ -104,6 +104,9 @@ pub struct Download {
     /// The release picked under a game's Versions, when it is not the
     /// current one: its version string, recorded on the installed game.
     pub release: Option<String>,
+    /// Place in the queue: the lowest waiting one goes next. Changed by
+    /// moving it up or down, or "Download now" (`download_move`).
+    pub queue_order: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -180,6 +183,9 @@ impl Limiter {
     }
 }
 
+/// The longest a transfer waits for data before it looks at Pause and Cancel.
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 const RUN: u8 = 0;
 const PAUSE: u8 = 1;
 const CANCEL: u8 = 2;
@@ -187,8 +193,13 @@ const CANCEL: u8 = 2;
 pub struct Downloads {
     list: Mutex<Vec<Download>>,
     controls: Mutex<HashMap<String, Arc<AtomicU8>>>,
-    /// One transfer at a time.
-    slot: tokio::sync::Semaphore,
+    /// One transfer at a time: the one holding the turn. Not a FIFO
+    /// semaphore, so the queue's order can change while games wait.
+    active: Mutex<Option<String>>,
+    /// Wakes the waiting downloads when the turn frees or the order changes.
+    turn: tokio::sync::Notify,
+    /// What the taskbar button last showed (`taskbar_state`).
+    taskbar: Mutex<Option<(u8, u64)>>,
     last_emit: Mutex<Option<Instant>>,
     /// What each mirror download resolved to. Not saved: cookies and signed
     /// addresses go stale, so a download resumed after a restart asks again.
@@ -200,7 +211,9 @@ impl Downloads {
         Self {
             list: Mutex::new(Vec::new()),
             controls: Mutex::new(HashMap::new()),
-            slot: tokio::sync::Semaphore::new(1),
+            active: Mutex::new(None),
+            turn: tokio::sync::Notify::new(),
+            taskbar: Mutex::new(None),
             last_emit: Mutex::new(None),
             resolved: Mutex::new(HashMap::new()),
         }
@@ -237,7 +250,66 @@ fn emit<R: Runtime>(app: &AppHandle<R>, force: bool) {
         }
     }
     let list = state.list.lock().map(|l| l.clone()).unwrap_or_default();
+    show_on_taskbar(app, &list);
     let _ = app.emit("downloads", list);
+}
+
+/// What the taskbar button shows for the downloads: (status, percent).
+/// 0 none, 1 normal, 2 waiting, 3 paused - as Steam does on its icon.
+pub fn taskbar_state(list: &[Download]) -> (u8, u64) {
+    let working = list.iter().find(|d| {
+        matches!(d.status, Status::Resolving | Status::Downloading | Status::Verifying | Status::Extracting)
+    });
+    if let Some(d) = working {
+        return (1, (overall_progress(d) * 100.0).round().clamp(0.0, 100.0) as u64);
+    }
+    if list.iter().any(|d| d.status == Status::Queued) {
+        return (2, 0);
+    }
+    if let Some(d) = list.iter().find(|d| d.status == Status::Paused) {
+        return (3, (overall_progress(d) * 100.0).round().clamp(0.0, 100.0) as u64);
+    }
+    (0, 0)
+}
+
+/// The same split the Downloads page draws: fetching to 85%, checking to 90%,
+/// unpacking the rest.
+fn overall_progress(d: &Download) -> f64 {
+    let part = d.extract_total.filter(|t| *t > 0).map(|t| (d.extracted as f64 / t as f64).min(1.0)).unwrap_or(0.0);
+    match d.status {
+        Status::Verifying => 0.85 + 0.05 * part,
+        Status::Extracting => {
+            if d.extract_total.is_some() {
+                0.9 + 0.1 * part
+            } else {
+                0.95
+            }
+        }
+        _ => d.total.filter(|t| *t > 0).map(|t| (d.received as f64 / t as f64).min(1.0) * 0.85).unwrap_or(0.0),
+    }
+}
+
+/// Progress on the app's taskbar button, so a download can be watched with
+/// the window minimised or behind a game. Only sent when it changes.
+fn show_on_taskbar<R: Runtime>(app: &AppHandle<R>, list: &[Download]) {
+    use tauri::window::{ProgressBarState, ProgressBarStatus};
+    let next = taskbar_state(list);
+    let state = app.state::<Downloads>();
+    if let Ok(mut last) = state.taskbar.lock() {
+        if *last == Some(next) {
+            return;
+        }
+        *last = Some(next);
+    }
+    let Some(window) = app.get_window("main") else { return };
+    let status = match next.0 {
+        1 => ProgressBarStatus::Normal,
+        2 => ProgressBarStatus::Indeterminate,
+        3 => ProgressBarStatus::Paused,
+        _ => ProgressBarStatus::None,
+    };
+    let progress = (next.0 == 1 || next.0 == 3).then_some(next.1);
+    let _ = window.set_progress_bar(ProgressBarState { status: Some(status), progress });
 }
 
 fn edit<R: Runtime>(app: &AppHandle<R>, id: &str, f: impl FnOnce(&mut Download)) -> Option<Download> {
@@ -453,8 +525,11 @@ fn enqueue_item<R: Runtime>(
     let named = title
         .filter(|t| !is_placeholder(t, slug.as_deref()))
         .or_else(|| file_name_in_link(&url).and_then(|n| title_in_file_name(&n)));
+    // At the back of the queue.
+    let queue_order = state.list.lock().map(|l| l.iter().map(|d| d.queue_order).max().unwrap_or(0) + 1).unwrap_or(1);
     let item = Download {
         id: id.clone(),
+        queue_order,
         meta: CatalogMeta {
             title: named.or_else(|| slug.clone()).unwrap_or_else(|| UNNAMED.into()),
             ..Default::default()
@@ -675,7 +750,6 @@ pub fn safe_name(name: &str) -> String {
 }
 
 async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
-    let downloads = app.state::<Downloads>();
     let settings = crate::settings::load(app);
     let client = reqwest::Client::builder()
         .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
@@ -725,10 +799,9 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
         }
     }
 
-    let _permit = downloads.slot.acquire().await.map_err(|e| e.to_string())?;
-    if flag.load(Ordering::SeqCst) != RUN {
+    let Some(_turn) = wait_for_turn(app, id, flag).await else {
         return settle_stopped(app, id, flag);
-    }
+    };
     // Settings as they are now, not as they were when it was queued.
     let settings = crate::settings::load(app);
 
@@ -949,6 +1022,113 @@ async fn verify<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> 
     Ok(())
 }
 
+/* ── the queue ─────────────────────────────────────────────── */
+
+/// Holding the turn; giving it back wakes whoever is next.
+struct Turn<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> Drop for Turn<R> {
+    fn drop(&mut self) {
+        let state = self.app.state::<Downloads>();
+        if let Ok(mut a) = state.active.lock() {
+            *a = None;
+        }
+        state.turn.notify_waiters();
+    }
+}
+
+/// Queue order, then age: the order every screen and the scheduler agree on.
+fn queue_key(d: &Download) -> (u64, u64) {
+    (if d.queue_order == 0 { u64::MAX / 2 + d.added_at } else { d.queue_order }, d.added_at)
+}
+
+/// The waiting download that goes next: queued, with a live task, first in order.
+fn next_in_line<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let state = app.state::<Downloads>();
+    let alive: Vec<String> = state.controls.lock().ok()?.keys().cloned().collect();
+    let list = state.list.lock().ok()?;
+    list.iter()
+        .filter(|d| d.status == Status::Queued && alive.contains(&d.id))
+        .min_by_key(|d| queue_key(d))
+        .map(|d| d.id.clone())
+}
+
+/// Wait until it is this download's turn. None when it was paused or
+/// cancelled while it waited.
+async fn wait_for_turn<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Option<Turn<R>> {
+    let state = app.state::<Downloads>();
+    loop {
+        if flag.load(Ordering::SeqCst) != RUN {
+            return None;
+        }
+        let next = next_in_line(app);
+        let mine = match state.active.lock() {
+            Ok(mut active) if active.is_none() && next.as_deref() == Some(id) => {
+                *active = Some(id.to_string());
+                true
+            }
+            Ok(_) => false,
+            Err(_) => return None,
+        };
+        if mine {
+            return Some(Turn { app: app.clone() });
+        }
+        // Woken on every change; the timeout is only a safety net.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), state.turn.notified()).await;
+    }
+}
+
+/// Renumber the queue: `order` first, then whatever else is unfinished.
+fn renumber<R: Runtime>(app: &AppHandle<R>, order: &[String]) {
+    let state = app.state::<Downloads>();
+    if let Ok(mut list) = state.list.lock() {
+        let mut rest: Vec<(u64, u64, String)> = list
+            .iter()
+            .filter(|d| !matches!(d.status, Status::Installed | Status::Canceled) && !order.contains(&d.id))
+            .map(|d| {
+                let (a, b) = queue_key(d);
+                (a, b, d.id.clone())
+            })
+            .collect();
+        rest.sort();
+        let all: Vec<String> = order.iter().cloned().chain(rest.into_iter().map(|r| r.2)).collect();
+        for d in list.iter_mut() {
+            if let Some(i) = all.iter().position(|x| x == &d.id) {
+                d.queue_order = i as u64 + 1;
+            }
+        }
+    };
+}
+
+/// The unfinished downloads other than the one running, in queue order.
+fn waiting_order<R: Runtime>(app: &AppHandle<R>, active: Option<&str>) -> Vec<String> {
+    let state = app.state::<Downloads>();
+    let Ok(list) = state.list.lock() else { return Vec::new() };
+    let mut v: Vec<&Download> = list
+        .iter()
+        .filter(|d| !matches!(d.status, Status::Installed | Status::Canceled) && Some(d.id.as_str()) != active)
+        .collect();
+    v.sort_by_key(|d| queue_key(d));
+    v.into_iter().map(|d| d.id.clone()).collect()
+}
+
+/// Mark a stopped download queued again and start its task.
+fn requeue<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    if app.state::<Downloads>().controls.lock().map(|c| c.contains_key(id)).unwrap_or(false) {
+        return Ok(());
+    }
+    edit(app, id, |d| {
+        d.error = None;
+        d.status = Status::Queued;
+    })
+    .ok_or("That download is gone.")?;
+    emit(app, true);
+    start(app.clone(), id.to_string());
+    Ok(())
+}
+
 fn settle_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
     if flag.load(Ordering::SeqCst) == CANCEL {
         if let Some(d) = edit(app, id, |_| {}) {
@@ -1148,12 +1328,20 @@ async fn transfer<R: Runtime>(
     let mut window_start = Instant::now();
     let mut window_bytes = 0u64;
     let mut last_persist = Instant::now();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        // Waiting on the next chunk is bounded, so Pause and Cancel answer
+        // within a moment even on a connection that has gone quiet.
+        let next = tokio::time::timeout(STOP_POLL, stream.next()).await;
         if flag.load(Ordering::SeqCst) != RUN {
             let _ = file.flush().await;
             edit(app, id, |d| d.received = received);
             return Ok(false);
         }
+        let chunk = match next {
+            Err(_) => continue,
+            Ok(None) => break,
+            Ok(Some(chunk)) => chunk,
+        };
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
@@ -1314,6 +1502,20 @@ async fn transfer_parallel<R: Runtime>(
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         // Pause and cancel reach the connections through `stop`.
         stop.store(flag.load(Ordering::SeqCst), Ordering::SeqCst);
+        if stop.load(Ordering::SeqCst) != RUN {
+            // Give the connections a moment to stop on their own, then stop
+            // the rest outright: one still waiting for a server to answer
+            // used to hold Pause and Cancel for as long as the server took.
+            // Safe, because progress only counts bytes already flushed.
+            let deadline = Instant::now() + std::time::Duration::from_millis(1200);
+            while Instant::now() < deadline && !tasks.iter().all(|t| t.is_finished()) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            for t in &tasks {
+                t.abort();
+            }
+            break;
+        }
         let sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
         let dt = tick.elapsed().as_secs_f64().max(0.001);
         let speed = (sum.saturating_sub(last_sum) as f64 / dt) as u64;
@@ -1412,10 +1614,16 @@ async fn fetch_range(
     let mut written = done;
     let mut stream = res.bytes_stream();
     let mut failure = None;
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::time::timeout(STOP_POLL, stream.next()).await;
         if stop.load(Ordering::SeqCst) != RUN {
             break;
         }
+        let chunk = match next {
+            Err(_) => continue,
+            Ok(None) => break,
+            Ok(Some(chunk)) => chunk,
+        };
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
@@ -1938,6 +2146,8 @@ pub fn download_pause(app: AppHandle, state: State<'_, Downloads>, id: String) {
     if let Some(flag) = state.controls.lock().ok().and_then(|c| c.get(&id).cloned()) {
         flag.store(PAUSE, Ordering::SeqCst);
         stop_resolving(&app, &id);
+        // A waiting one stops at once instead of at its next check.
+        state.turn.notify_waiters();
     }
 }
 
@@ -1949,17 +2159,63 @@ fn stop_resolving(app: &AppHandle, id: &str) {
 }
 
 #[tauri::command]
-pub fn download_resume(app: AppHandle, state: State<'_, Downloads>, id: String) -> Result<(), String> {
-    if state.controls.lock().map(|c| c.contains_key(&id)).unwrap_or(false) {
-        return Ok(());
+pub fn download_resume(app: AppHandle, id: String) -> Result<(), String> {
+    requeue(&app, &id)
+}
+
+/// Move a download in the queue: "up", "down", "top", or "now" (to the front,
+/// and the one running steps aside: paused, then queued again right behind
+/// it, as Steam does).
+#[tauri::command]
+pub fn download_move(app: AppHandle, state: State<'_, Downloads>, id: String, to: String) -> Result<(), String> {
+    let active = state.active.lock().ok().and_then(|a| a.clone());
+    let mut order = waiting_order(&app, active.as_deref());
+    let Some(at) = order.iter().position(|x| x == &id) else {
+        return Err("That download is not waiting.".into());
+    };
+    match to.as_str() {
+        "up" if at > 0 => order.swap(at, at - 1),
+        "down" if at + 1 < order.len() => order.swap(at, at + 1),
+        "top" | "now" => {
+            let item = order.remove(at);
+            order.insert(0, item);
+        }
+        "up" | "down" => {}
+        _ => return Err("Unknown move.".into()),
     }
-    edit(&app, &id, |d| {
-        d.error = None;
-        d.status = Status::Queued;
-    })
-    .ok_or("That download is gone.")?;
+    if to == "now" {
+        if let Some(current) = active.as_ref().filter(|c| *c != &id) {
+            order.insert(1, current.clone());
+        }
+    }
+    renumber(&app, &order);
+    persist(&app);
     emit(&app, true);
-    start(app.clone(), id);
+    if to == "now" {
+        // A paused or failed one starts too.
+        requeue(&app, &id)?;
+        if let Some(current) = active.filter(|c| c != &id) {
+            if let Some(flag) = state.controls.lock().ok().and_then(|c| c.get(&current).cloned()) {
+                flag.store(PAUSE, Ordering::SeqCst);
+                stop_resolving(&app, &current);
+            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                // Once it has stopped, back in the queue behind the new first.
+                for _ in 0..300 {
+                    let running = app.state::<Downloads>().controls.lock().map(|c| c.contains_key(&current)).unwrap_or(false);
+                    if !running {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                if edit(&app, &current, |_| {}).is_some_and(|d| d.status == Status::Paused) {
+                    let _ = requeue(&app, &current);
+                }
+            });
+        }
+    }
+    state.turn.notify_waiters();
     Ok(())
 }
 
@@ -1968,6 +2224,7 @@ pub fn download_cancel(app: AppHandle, state: State<'_, Downloads>, id: String) 
     if let Some(flag) = state.controls.lock().ok().and_then(|c| c.get(&id).cloned()) {
         flag.store(CANCEL, Ordering::SeqCst);
         stop_resolving(&app, &id);
+        state.turn.notify_waiters();
         return;
     }
     // Not running (paused or failed): tidy up here.
@@ -1996,6 +2253,18 @@ pub fn download_remove(app: AppHandle, state: State<'_, Downloads>, id: String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taskbar_follows_the_download_that_is_running() {
+        let mut d = Download { status: Status::Downloading, total: Some(1000), received: 500, ..Default::default() };
+        let queued = Download { status: Status::Queued, ..Default::default() };
+        assert_eq!(taskbar_state(&[queued.clone(), d.clone()]), (1, 43));
+        d.status = Status::Paused;
+        assert_eq!(taskbar_state(&[d.clone()]), (3, 43));
+        assert_eq!(taskbar_state(&[queued]), (2, 0));
+        d.status = Status::Installed;
+        assert_eq!(taskbar_state(&[d]), (0, 0));
+    }
 
     #[test]
     fn ranges_cover_the_file_exactly() {

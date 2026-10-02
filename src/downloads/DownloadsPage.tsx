@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Download, HeartHandshake, Pause, Play, RotateCw, X } from 'lucide-react'
+import { ArrowUpToLine, ChevronDown, ChevronUp, Download, HeartHandshake, Loader2, Pause, Play, RotateCw, X } from 'lucide-react'
 import { AsciiBar, AsciiSpark, Button, Caption, IconButton, Label } from '@/ui'
 import { downloads as api, formatBytes, formatEta, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { Art } from '@/library/Art'
@@ -25,7 +25,10 @@ export function DownloadsPage({
   onDonate: (() => void) | null
 }) {
   const current = list.find(isWorking)
-  const waiting = list.filter((d) => d !== current && (isActive(d) || d.status === 'paused' || d.status === 'failed'))
+  // In queue order, which the arrows change.
+  const waiting = list
+    .filter((d) => d !== current && (isActive(d) || d.status === 'paused' || d.status === 'failed'))
+    .sort((a, b) => (a.queueOrder || Number.MAX_SAFE_INTEGER) - (b.queueOrder || Number.MAX_SAFE_INTEGER) || a.addedAt - b.addedAt)
   const done = list.filter((d) => d.status === 'installed' || d.status === 'canceled')
 
   if (list.length === 0) {
@@ -45,14 +48,27 @@ export function DownloadsPage({
       {waiting.length ? (
         <section className="grid gap-3">
           <Label>Up next · {waiting.length}</Label>
-          {waiting.map((d) => (
-            <Row key={d.id} d={d} onOpenGame={onOpenGame} />
+          {waiting.map((d, i) => (
+            <Row key={d.id} d={d} onOpenGame={onOpenGame} queue={{ first: i === 0, last: i === waiting.length - 1 }} />
           ))}
         </section>
       ) : null}
       {done.length ? (
         <section className="grid gap-3">
-          <Label>Finished · {done.length}</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label>Finished · {done.length}</Label>
+            {/* One press for the whole list instead of one per row. The games
+                stay installed; only the history goes. */}
+            <Button
+              size="sm"
+              onClick={() => {
+                for (const d of done) void api.remove(d.id).catch(() => {})
+              }}
+            >
+              <X className="size-3" />
+              Clear all
+            </Button>
+          </div>
           {done.map((d) => (
             <Row key={d.id} d={d} onOpenGame={onOpenGame} />
           ))}
@@ -82,8 +98,35 @@ function Donate({ onDonate }: { onDonate: () => void }) {
   )
 }
 
+/**
+ * An action that takes a moment to land (pausing has to wait for the
+ * connections to stop): which one was pressed, until the download's status
+ * moves or ten seconds pass. The button shows it is working instead of
+ * looking like it ignored the click.
+ */
+function usePending(d: Dl) {
+  const [pending, setPending] = useState<string | null>(null)
+  useEffect(() => setPending(null), [d.status])
+  useEffect(() => {
+    if (!pending) return
+    const t = setTimeout(() => setPending(null), 10_000)
+    return () => clearTimeout(t)
+  }, [pending])
+  const run = (what: string, action: () => Promise<unknown>) => {
+    if (pending) return
+    setPending(what)
+    void action().catch(() => setPending(null))
+  }
+  return { pending, run }
+}
+
+function Spinner() {
+  return <Loader2 className="size-3 animate-spin" aria-hidden />
+}
+
 function Current({ d }: { d: Dl }) {
   const samples = useSpeedHistory(d)
+  const { pending, run } = usePending(d)
   // Past the download: checking the hash, then unpacking.
   const extracting = d.status === 'extracting' || d.status === 'verifying'
   const resolving = d.status === 'resolving'
@@ -104,12 +147,12 @@ function Current({ d }: { d: Dl }) {
           </div>
           {!extracting ? (
             <div className="flex gap-2">
-              <Button size="sm" onClick={() => void api.pause(d.id)}>
-                <Pause className="size-3" />
-                Pause
+              <Button size="sm" disabled={Boolean(pending)} onClick={() => run('pause', () => api.pause(d.id))}>
+                {pending === 'pause' ? <Spinner /> : <Pause className="size-3" />}
+                {pending === 'pause' ? 'Pausing' : 'Pause'}
               </Button>
-              <IconButton label="Cancel" onClick={() => void api.cancel(d.id)}>
-                <X className="size-3.5" />
+              <IconButton label={pending === 'cancel' ? 'Cancelling' : 'Cancel'} disabled={Boolean(pending)} onClick={() => run('cancel', () => api.cancel(d.id))}>
+                {pending === 'cancel' ? <Loader2 className="size-3.5 animate-spin" /> : <X className="size-3.5" />}
               </IconButton>
             </div>
           ) : null}
@@ -141,8 +184,18 @@ function Current({ d }: { d: Dl }) {
   )
 }
 
-function Row({ d, onOpenGame }: { d: Dl; onOpenGame: (id: string) => void }) {
+function Row({
+  d,
+  onOpenGame,
+  queue,
+}: {
+  d: Dl
+  onOpenGame: (id: string) => void
+  /** Set for rows in the queue: where it is, for the arrows. */
+  queue?: { first: boolean; last: boolean }
+}) {
   const pct = progressOf(d)
+  const { pending, run } = usePending(d)
   const status =
     d.status === 'installed'
       ? `Installed${d.finishedAt ? ` ${new Date(d.finishedAt * 1000).toLocaleDateString()}` : ''}`
@@ -170,7 +223,22 @@ function Row({ d, onOpenGame }: { d: Dl; onOpenGame: (id: string) => void }) {
         {d.error ? <span className="text-xs text-destructive">{d.error}</span> : null}
         {d.warning ? <span className="text-xs leading-relaxed text-warning">{d.warning}</span> : null}
       </div>
-      <div className="flex gap-2">
+      <div className="flex items-center gap-2">
+        {queue ? (
+          <div className="flex items-center gap-1">
+            {!queue.first ? (
+              <IconButton label="Download now" onClick={() => run('now', () => api.move(d.id, 'now'))} disabled={Boolean(pending)}>
+                {pending === 'now' ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUpToLine className="size-3.5" />}
+              </IconButton>
+            ) : null}
+            <IconButton label="Move up" disabled={queue.first} onClick={() => void api.move(d.id, 'up')}>
+              <ChevronUp className="size-3.5" />
+            </IconButton>
+            <IconButton label="Move down" disabled={queue.last} onClick={() => void api.move(d.id, 'down')}>
+              <ChevronDown className="size-3.5" />
+            </IconButton>
+          </div>
+        ) : null}
         {d.status === 'installed' && d.gameId ? (
           <Button variant="primary" size="sm" onClick={() => onOpenGame(d.gameId!)}>
             <Play className="size-3 fill-current" />
@@ -178,14 +246,15 @@ function Row({ d, onOpenGame }: { d: Dl; onOpenGame: (id: string) => void }) {
           </Button>
         ) : null}
         {d.status === 'paused' || d.status === 'failed' ? (
-          <Button variant="primary" size="sm" onClick={() => void api.resume(d.id)}>
-            {d.status === 'failed' ? <RotateCw className="size-3" /> : <Download className="size-3" />}
+          <Button variant="primary" size="sm" disabled={Boolean(pending)} onClick={() => run('resume', () => api.resume(d.id))}>
+            {pending === 'resume' ? <Spinner /> : d.status === 'failed' ? <RotateCw className="size-3" /> : <Download className="size-3" />}
             {d.status === 'failed' ? 'Retry' : 'Resume'}
           </Button>
         ) : null}
         {d.status === 'paused' || d.status === 'queued' || d.status === 'failed' ? (
-          <Button size="sm" variant="ghost" onClick={() => void api.cancel(d.id)}>
-            Cancel
+          <Button size="sm" variant="ghost" disabled={Boolean(pending)} onClick={() => run('cancel', () => api.cancel(d.id))}>
+            {pending === 'cancel' ? <Spinner /> : null}
+            {pending === 'cancel' ? 'Cancelling' : 'Cancel'}
           </Button>
         ) : null}
         {d.status === 'installed' || d.status === 'canceled' ? (

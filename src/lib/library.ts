@@ -52,6 +52,9 @@ export type LibraryGame = {
   addons?: InstalledAddon[]
   /** Kryoto Online set up on this PC. */
   online?: { version: string; added: string[]; saved: [string, string][]; appliedAt: number } | null
+  /** This game's in-game name, over Settings'; null follows Settings. */
+  playerNameMode?: import('@/lib/settings').PlayerNameMode | null
+  playerName?: string
 }
 
 export type InstalledAddon = { label: string; file: string; files: string[]; installedAt: number }

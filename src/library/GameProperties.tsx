@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { pickPath } from '@/lib/pick'
 import { FolderOpen, Glasses, Play, Trash2 } from 'lucide-react'
-import { Button, Check, CommandLine, Modal, Panes, Section, inputCls } from '@/ui'
+import { Button, Check, CommandLine, Modal, Panes, Section, Segmented, inputCls } from '@/ui'
+import { PLAYER_NAME_MAX } from '@/lib/settings'
 import { CompatPicker } from '@/settings/CompatPicker'
 import { errorText, isTauri } from '@/lib/bridge'
 import { formatBytes } from '@/lib/downloads'
@@ -178,6 +179,37 @@ export function GameProperties({
           <>
             <Section title="Name">
               <input className={inputCls} value={draft.title} onChange={(e) => set('title', e.target.value)} />
+            </Section>
+            <Section
+              title="In-game name"
+              hint={
+                /kryoto online/i.test(draft.source ?? '')
+                  ? 'This build plays through Kryoto Online, which uses your Steam name. This only changes it where the build has its own emulator files.'
+                  : 'Written into the game\'s emulator files each time it starts.'
+              }
+            >
+              <div className="grid gap-2">
+                <Segmented
+                  value={draft.playerNameMode ?? 'settings'}
+                  options={[
+                    { value: 'settings', label: 'Same as Settings' },
+                    { value: 'account', label: 'K// username' },
+                    { value: 'custom', label: 'Custom' },
+                    { value: 'build', label: "Game's own" },
+                  ]}
+                  onChange={(v) => set('playerNameMode', v === 'settings' ? null : v)}
+                />
+                {draft.playerNameMode === 'custom' ? (
+                  <input
+                    className={inputCls}
+                    value={draft.playerName ?? ''}
+                    maxLength={PLAYER_NAME_MAX}
+                    placeholder="Your name in this game"
+                    spellCheck={false}
+                    onChange={(e) => set('playerName', e.target.value)}
+                  />
+                ) : null}
+              </div>
             </Section>
             {draft.entries.length > 0 ? (
               <Section title="When you press Play">

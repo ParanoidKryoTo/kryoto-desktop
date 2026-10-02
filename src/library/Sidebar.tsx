@@ -112,9 +112,16 @@ export function Sidebar({
         <label className="kryo-pill flex h-9 items-center gap-2 border border-border bg-background px-3 text-muted-foreground focus-within:border-foreground">
           <Search className="size-3.5 shrink-0" />
           <input
+            id="library-search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search your games"
+            // Escape clears the search first, then leaves the field.
+            onKeyDown={(e) => {
+              if (e.key !== 'Escape') return
+              if (query) setQuery('')
+              else e.currentTarget.blur()
+            }}
+            placeholder="Search your games (Ctrl+F)"
             aria-label="Search your games"
             className="kryo-square min-w-0 grow bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground"
           />

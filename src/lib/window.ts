@@ -119,7 +119,9 @@ export function rememberWindowSize(width: number, height: number) {
  */
 export function mountStore(url: string, rect: { x: number; y: number; width: number; height: number }, visible?: boolean) {
   if (!isTauri()) return Promise.resolve()
-  return call<void>('store_mount', { url, ...rect, visible: visible ?? null, userAgent: navigator.userAgent })
+  // The page's own pixel ratio, so the view lands where it was measured even
+  // when Windows reports another scale for the window (src-tauri placement.rs).
+  return call<void>('store_mount', { url, ...rect, visible: visible ?? null, userAgent: navigator.userAgent, scale: window.devicePixelRatio || null })
 }
 
 /*

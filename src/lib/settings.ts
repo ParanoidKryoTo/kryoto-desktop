@@ -40,7 +40,16 @@ export type Settings = {
   linuxGamemode: boolean
   /** Linux: Proton-GE's FSR upscaling at lower fullscreen resolutions. */
   linuxFsr: boolean
+  /** The name in games: your K// username, `playerName`, or each build's own. */
+  playerNameMode: PlayerNameMode
+  playerName: string
 }
+
+/** How a game's in-game name is picked (src-tauri player_name.rs). */
+export type PlayerNameMode = 'account' | 'custom' | 'build'
+
+/** Steam's limit for a name, which the emulators share. */
+export const PLAYER_NAME_MAX = 32
 
 /** kryo.to's palettes, named as the site names them. */
 export const PALETTES: { id: Palette; label: string }[] = [
@@ -114,6 +123,8 @@ function publish(s: Settings) {
 }
 
 export const settingsApi = {
+  /** The K// username games get, remembered from the last sign-in. Null for a guest. */
+  playerAccountName: () => call<string | null>('player_account_name'),
   get: async () => {
     const s = await call<Settings>('settings_get')
     clearCatalogEndpointCache()

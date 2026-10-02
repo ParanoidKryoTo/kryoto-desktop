@@ -225,6 +225,29 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     wasOnline.current = online
   }, [online, web])
 
+  // Ctrl+F searches your library, Ctrl+, opens Settings - the keys every
+  // desktop app uses. Over the Store the page keeps its own Ctrl+F.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
+      if (e.key === ',') {
+        e.preventDefault()
+        openSettings()
+      } else if (e.key.toLowerCase() === 'f' && view.kind !== 'web') {
+        e.preventDefault()
+        if (view.kind !== 'home' && view.kind !== 'game' && view.kind !== 'catalog') go({ kind: 'home' })
+        // After the Library has drawn its rail.
+        setTimeout(() => {
+          const field = document.getElementById('library-search') as HTMLInputElement | null
+          field?.focus()
+          field?.select()
+        }, 30)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [view.kind, go, openSettings])
+
   // F11, like every other full-screen app.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -402,7 +425,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
     {
       label: 'Kryoto',
       items: [
-        { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings() },
+        { label: 'Settings', icon: <SettingsIcon />, hint: 'Ctrl ,', onSelect: () => openSettings() },
         { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
         { separator: true },
         guest
@@ -417,7 +440,8 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
         { label: 'Store', onSelect: () => openStore() },
         { label: 'Library', onSelect: () => go({ kind: 'home' }) },
         { label: 'Downloads', onSelect: () => go({ kind: 'downloads' }) },
-        { label: 'Community', onSelect: () => openWeb('/blog') },
+        { label: 'Community', onSelect: () => go({ kind: 'community' }) },
+        { label: 'Blog', onSelect: () => openWeb('/blog') },
         { label: 'Friends & chat', onSelect: () => go({ kind: 'friends' }) },
         { separator: true },
         { label: 'Reload page', hint: 'Ctrl R', disabled: view.kind !== 'web', onSelect: () => web.reload() },
@@ -428,6 +452,14 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
       label: 'Games',
       items: [
         { label: 'View games library', onSelect: () => go({ kind: 'home' }) },
+        {
+          label: 'Search your games',
+          hint: 'Ctrl F',
+          onSelect: () => {
+            go({ kind: 'home' })
+            setTimeout(() => document.getElementById('library-search')?.focus(), 30)
+          },
+        },
         { label: 'Add a game on this PC', icon: <Plus />, onSelect: () => setOverlay({ kind: 'add', slug: null }) },
         ...(recent.length
           ? [{ separator: true } as MenuEntry, { heading: 'Recent' } as MenuEntry, ...recent.map((g) => ({ label: g.title, icon: <Play />, onSelect: () => play(g) }))]
@@ -521,7 +553,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   const accountMenu: MenuEntry[] = guest
     ? [
         { label: 'Sign in to kryo.to', icon: <User />, onSelect: signIn },
-        { label: 'Settings', icon: <SettingsIcon />, onSelect: () => openSettings() },
+        { label: 'Settings', icon: <SettingsIcon />, hint: 'Ctrl ,', onSelect: () => openSettings() },
       ]
     : [
         { label: 'View profile', icon: <User />, onSelect: () => openWeb(`/user/${username}`) },

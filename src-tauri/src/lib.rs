@@ -11,6 +11,8 @@ mod linux_overlay;
 mod logging;
 mod menus;
 mod online;
+mod placement;
+mod player_name;
 mod resolvers;
 mod settings;
 mod storage;
@@ -19,7 +21,7 @@ mod system;
 use serde::{Deserialize, Serialize};
 use tauri::plugin::Builder as PluginBuilder;
 use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder};
-use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl};
+use tauri::{Emitter, Manager, Runtime, WebviewUrl};
 
 /// The Store / Community / profile pages: one real web view, kryo.to in it.
 /// The label is what `capabilities/catalog.json` grants the reporting bridge to.
@@ -521,10 +523,11 @@ async fn store_mount(
     height: f64,
     visible: Option<bool>,
     user_agent: Option<String>,
+    // The shell's devicePixelRatio; see placement.rs.
+    scale: Option<f64>,
 ) -> Result<(), String> {
     if let Some(view) = app.get_webview(STORE) {
-        view.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
-        view.set_size(LogicalSize::new(width.max(1.0), height.max(1.0))).map_err(|e| e.to_string())?;
+        placement::place(&view, x, y, width, height, scale)?;
         #[cfg(target_os = "linux")]
         linux_overlay::place(&view, x, y, width, height);
         // Visibility is `store_visible`'s job: a resize while a dialog is up
@@ -588,9 +591,8 @@ async fn store_mount(
             }
             NewWindowResponse::Deny
         });
-    let view = window
-        .add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(width.max(1.0), height.max(1.0)))
-        .map_err(|e| e.to_string())?;
+    let (position, size) = placement::rect(x, y, width, height, scale);
+    let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
     if visible == Some(false) {
         let _ = view.hide();
     }
@@ -733,6 +735,7 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
     if is_kryoto(&actual, &app) {
         if let Some(account) = state.account {
             logging::set_account(account.as_ref().map(|a| a.username.clone()));
+            player_name::remember_account(&app, account.as_ref().map(|a| a.username.as_str()));
             let _ = app.emit_to("main", "account-state", account);
         }
         if let Some(inbox) = state.inbox {
@@ -1065,6 +1068,8 @@ pub fn run() {
             downloads::downloads_list,
             downloads::download_pause,
             downloads::download_resume,
+            downloads::download_move,
+            player_name::player_account_name,
             downloads::download_cancel,
             downloads::download_remove,
             download_mirror,

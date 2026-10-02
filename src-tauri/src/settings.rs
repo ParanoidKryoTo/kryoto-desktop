@@ -63,6 +63,10 @@ pub struct Settings {
     /// the struct's).
     #[serde(default)]
     pub connections_v2: bool,
+    /// The name you have in games: your K// username, the one typed below,
+    /// or each build's own (player_name.rs). Games can pick their own.
+    pub player_name_mode: crate::player_name::Mode,
+    pub player_name: String,
 }
 
 impl Default for Settings {
@@ -92,6 +96,8 @@ impl Default for Settings {
             linux_gamemode: false,
             linux_fsr: false,
             connections_v2: true,
+            player_name_mode: crate::player_name::Mode::Account,
+            player_name: String::new(),
         }
     }
 }
@@ -224,6 +230,7 @@ pub fn settings_save(app: AppHandle, mut settings: Settings) -> Result<Settings,
         return Err("Pick a folder for the library.".into());
     }
     settings.catalog_endpoint = normalize_catalog_endpoint(&settings.catalog_endpoint)?;
+    settings.player_name = crate::player_name::clean(&settings.player_name).unwrap_or_default();
     // A choice made in Settings is the player's, never migrated again.
     settings.connections_v2 = true;
     std::fs::create_dir_all(&settings.library_dir)
