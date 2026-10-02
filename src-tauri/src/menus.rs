@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::webview::WebviewBuilder;
 use tauri::window::Color;
-use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, WebviewUrl};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl};
 
 /// The menu's web view. `capabilities/default.json` lets it call the shell's
 /// commands; it loads the shell's own page and draws `PopupApp`.
@@ -38,6 +38,8 @@ pub struct Menus {
     /// The menu being shown, as the shell sent it.
     payload: Mutex<Option<serde_json::Value>>,
     anchor: Mutex<(Anchor, bool)>,
+    /// The shell's devicePixelRatio when the menu was asked for (placement.rs).
+    scale: Mutex<Option<f64>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -66,9 +68,16 @@ pub fn close<R: Runtime>(app: &AppHandle<R>) {
 /// Open a menu under `anchor` (logical pixels in the main window). With
 /// `right`, its right edge lines up with the anchor's instead of its left.
 #[tauri::command]
-pub async fn menu_open(app: AppHandle, anchor: Anchor, right: bool, payload: serde_json::Value) -> Result<(), String> {
+pub async fn menu_open(
+    app: AppHandle,
+    anchor: Anchor,
+    right: bool,
+    payload: serde_json::Value,
+    scale: Option<f64>,
+) -> Result<(), String> {
     let state = app.state::<Menus>();
     let previous = open_id(&app);
+    *state.scale.lock().map_err(|_| "menu lock")? = crate::placement::css_scale(scale);
     *state.payload.lock().map_err(|_| "menu lock")? = Some(payload.clone());
     *state.anchor.lock().map_err(|_| "menu lock")? = (anchor, right);
     // Another menu was up (hovering from tab to tab): it closed.
@@ -88,9 +97,8 @@ pub async fn menu_open(app: AppHandle, anchor: Anchor, right: bool, payload: ser
         // The shell's own background, for the moment before the menu paints.
         .background_color(Color(10, 10, 10, 255))
         .focused(false);
-    let view = window
-        .add_child(builder, LogicalPosition::new(anchor.left, anchor.bottom), LogicalSize::new(320.0, 480.0))
-        .map_err(|e| e.to_string())?;
+    let (position, size) = crate::placement::rect(anchor.left, anchor.bottom, 320.0, 480.0, scale);
+    let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
     let _ = view.hide();
     Ok(())
 }
@@ -110,15 +118,20 @@ pub async fn menu_ready(app: AppHandle, menu: String, width: f64, height: f64) -
     }
     let view = app.get_webview(LABEL).ok_or("no menu")?;
     let window = app.get_window("main").ok_or("The main window is gone.")?;
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    // The shell's own ratio when it sent one, so the menu's CSS pixels and
+    // the window's size are measured the same way.
+    let css = *app.state::<Menus>().scale.lock().map_err(|_| "menu lock")?;
+    let scale = match css {
+        Some(s) => s,
+        None => window.scale_factor().map_err(|e| e.to_string())?,
+    };
     let inner = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
     let (anchor, right) = *app.state::<Menus>().anchor.lock().map_err(|_| "menu lock")?;
     let (width, height) = (width.ceil().max(40.0), height.ceil().max(20.0));
     let x = if right { anchor.right - width } else { anchor.left };
     let x = x.min(inner.width - width - GAP).max(GAP);
     let y = (anchor.bottom + GAP).min(inner.height - height - GAP).max(GAP);
-    view.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
-    view.set_size(LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
+    crate::placement::place(&view, x, y, width, height, css)?;
     #[cfg(target_os = "linux")]
     crate::linux_overlay::place(&view, x, y, width, height);
     view.show().map_err(|e| e.to_string())?;

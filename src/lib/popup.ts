@@ -110,7 +110,7 @@ export async function openMenu(menu: string, anchor: DOMRect | Anchor, entries: 
     return { id, label: e.label, hint: e.hint, danger: e.danger, disabled: e.disabled, checked: e.checked, icon: iconMarkup(e.icon) }
   })
   setCurrent(menu)
-  await call('menu_open', { anchor: anchorOf(anchor), right: align === 'right', payload: { menu, kind: 'menu', items, minWidth, look: look() } }).catch(
+  await call('menu_open', { scale: window.devicePixelRatio || null, anchor: anchorOf(anchor), right: align === 'right', payload: { menu, kind: 'menu', items, minWidth, look: look() } }).catch(
     () => setCurrent(null),
   )
 }
@@ -127,7 +127,7 @@ export async function openInbox(
   handlers.set(`${menu}:read`, actions.markRead)
   handlers.set(`${menu}:all`, actions.all)
   setCurrent(menu)
-  await call('menu_open', { anchor: anchorOf(anchor), right: true, payload: { menu, kind: 'inbox', inbox, look: look() } }).catch(() =>
+  await call('menu_open', { scale: window.devicePixelRatio || null, anchor: anchorOf(anchor), right: true, payload: { menu, kind: 'inbox', inbox, look: look() } }).catch(() =>
     setCurrent(null),
   )
 }

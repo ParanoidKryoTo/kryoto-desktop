@@ -42,6 +42,8 @@ export type Download = {
   mirror?: { page: string; host: string } | null
   /** A build other than the current one, picked under Versions. */
   release?: string | null
+  /** Place in the queue: lower goes first. */
+  queueOrder?: number
   meta: {
     title: string
     cover: string | null
@@ -65,6 +67,8 @@ export const downloads = {
   resume: (id: string) => call<void>('download_resume', { id }),
   cancel: (id: string) => call<void>('download_cancel', { id }),
   remove: (id: string) => call<void>('download_remove', { id }),
+  /** Reorder the queue. `now` puts it first and steps the running one aside, like Steam. */
+  move: (id: string, to: 'up' | 'down' | 'top' | 'now') => call<void>('download_move', { id, to }),
   /** Download a game from one of its mirrors. `release` names a build other than the current one. */
   mirror: (url: string, slug: string, title: string | null, release: string | null) =>
     call<void>('download_mirror', { url, slug, title, release }),

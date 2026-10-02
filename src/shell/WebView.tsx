@@ -44,10 +44,24 @@ export function WebSlot({
     const ro = new ResizeObserver(place)
     ro.observe(el)
     window.addEventListener('resize', place)
+    // A new display scale (another monitor, a changed Windows setting) can
+    // leave the slot's CSS size unchanged; the view still has to be re-placed.
+    let dpr: MediaQueryList | null = null
+    const watchScale = () => {
+      dpr?.removeEventListener('change', onScale)
+      dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+      dpr.addEventListener('change', onScale)
+    }
+    const onScale = () => {
+      place()
+      watchScale()
+    }
+    watchScale()
     return () => {
       ro.disconnect()
       setMainPlacer(null)
       window.removeEventListener('resize', place)
+      dpr?.removeEventListener('change', onScale)
     }
     // Placed once per mount; later addresses come from navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
