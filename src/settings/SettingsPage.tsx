@@ -3,7 +3,7 @@ import { artSrc } from '@/lib/art'
 import { Bell, Code2, Download, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
-import { settingsApi, useSettings, type Settings } from '@/lib/settings'
+import { PLAYER_NAME_MAX, settingsApi, useSettings, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -199,9 +199,10 @@ function DesktopPane({ section }: { section: SettingsSection }) {
     if (stored) setEndpointDraft(stored.catalogEndpoint)
   }, [stored?.catalogEndpoint])
 
-  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => {
+  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => patch({ [k]: v } as Partial<Settings>)
+  const patch = (p: Partial<Settings>) => {
     if (!s) return
-    const next = { ...s, [k]: v }
+    const next = { ...s, ...p }
     setS(next)
     setState('saving')
     window.clearTimeout(timer.current)
@@ -287,6 +288,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             <Check checked={s.closeToTray} onChange={(v) => set('closeToTray', v)} label="Closing the window keeps Kryoto running in the tray" />
             <Check checked={s.startWithSystem} onChange={(v) => set('startWithSystem', v)} label={`Start Kryoto when I sign in to ${isWindowsHost() ? 'Windows' : 'my computer'}`} />
             <Check checked={s.minimizeOnPlay} onChange={(v) => set('minimizeOnPlay', v)} label="Minimize Kryoto while a game runs" />
+            <PlayerNameSection s={s} patch={patch} />
             <Section title="Play time" hint="Counts toward the community statistics, and toward what people are playing right now (a number per game, never who). The play-time board only shows public profiles.">
               <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Share my play time and what I am playing with kryo.to" />
             </Section>
@@ -325,5 +327,45 @@ function DesktopPane({ section }: { section: SettingsSection }) {
         {section === 'logs' ? <LogsPane sendReports={s.sendReports} onSendReports={(v) => set('sendReports', v)} /> : null}
       </div>
     </div>
+  )
+}
+
+/**
+ * The name you have in games. Ticked: your K// username. Unticked: the name
+ * typed here, or - left empty - whatever each build came with. Written into
+ * the game's emulator files as it starts (src-tauri player_name.rs).
+ */
+function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Settings>) => void }) {
+  const [account, setAccount] = useState<string | null>(null)
+  useEffect(() => {
+    if (isTauri()) void settingsApi.playerAccountName().then(setAccount).catch(() => {})
+  }, [])
+  const useAccount = s.playerNameMode === 'account'
+  return (
+    <Section
+      title="In-game name"
+      hint="What games and other players call you, in games built with gbe_fork or RUNE (most of the catalog). Set it per game under Properties. Kryoto Online games use your Steam name."
+    >
+      <div className="grid gap-3">
+        <Check
+          checked={useAccount}
+          onChange={(on) => patch({ playerNameMode: on ? 'account' : s.playerName.trim() ? 'custom' : 'build' })}
+          label={account ? `Use my K// username (${account})` : 'Use my K// username (sign in to kryo.to to set it)'}
+        />
+        {!useAccount ? (
+          <label className="grid gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Custom name
+            <input
+              className={inputCls}
+              value={s.playerName}
+              maxLength={PLAYER_NAME_MAX}
+              placeholder="Empty keeps each game's own name"
+              spellCheck={false}
+              onChange={(e) => patch({ playerName: e.target.value, playerNameMode: e.target.value.trim() ? 'custom' : 'build' })}
+            />
+          </label>
+        ) : null}
+      </div>
+    </Section>
   )
 }

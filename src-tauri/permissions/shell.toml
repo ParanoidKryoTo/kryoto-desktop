@@ -43,6 +43,7 @@ commands.allow = [
   "download_pause",
   "download_resume",
   "download_move",
+  "player_account_name",
   "download_cancel",
   "download_remove",
   "download_mirror",

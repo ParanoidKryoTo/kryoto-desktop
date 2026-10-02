@@ -12,6 +12,7 @@ mod logging;
 mod menus;
 mod online;
 mod placement;
+mod player_name;
 mod resolvers;
 mod settings;
 mod storage;
@@ -734,6 +735,7 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
     if is_kryoto(&actual, &app) {
         if let Some(account) = state.account {
             logging::set_account(account.as_ref().map(|a| a.username.clone()));
+            player_name::remember_account(&app, account.as_ref().map(|a| a.username.as_str()));
             let _ = app.emit_to("main", "account-state", account);
         }
         if let Some(inbox) = state.inbox {
@@ -1067,6 +1069,7 @@ pub fn run() {
             downloads::download_pause,
             downloads::download_resume,
             downloads::download_move,
+            player_name::player_account_name,
             downloads::download_cancel,
             downloads::download_remove,
             download_mirror,

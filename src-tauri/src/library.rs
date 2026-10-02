@@ -65,6 +65,9 @@ pub struct LibraryGame {
     pub addons: Vec<crate::addons::InstalledAddon>,
     /// Kryoto Online set up on this PC (not from a kryo.to add-on), for Undo.
     pub online: Option<crate::online::LocalOnline>,
+    /// This game's in-game name, over Settings'; None follows Settings.
+    pub player_name_mode: Option<crate::player_name::Mode>,
+    pub player_name: String,
 }
 
 #[derive(Default)]
@@ -262,6 +265,7 @@ pub fn library_save(app: AppHandle, game: LibraryGame) -> Result<LibraryGame, St
         // Only applying and undoing change these, never the Properties window.
         next.addons = slot.addons.clone();
         next.online = slot.online.clone();
+        next.player_name = crate::player_name::clean(&next.player_name).unwrap_or_default();
         if next.preferred_entry.is_some_and(|i| i >= next.entries.len()) {
             next.preferred_entry = None;
         }
@@ -418,6 +422,9 @@ pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entr
     if let Some(prefix) = plan.env.iter().find(|(k, _)| k == "WINEPREFIX" || k == "STEAM_COMPAT_DATA_PATH") {
         let _ = std::fs::create_dir_all(&prefix.1);
     }
+
+    // The name the player picked, into the emulator's files, before it reads them.
+    crate::player_name::apply_for_launch(&app, &game);
 
     let mut cmd = launch::command(&plan);
     #[cfg(unix)]
