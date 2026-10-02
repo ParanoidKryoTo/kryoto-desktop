@@ -52,7 +52,20 @@ export function DownloadsPage({
       ) : null}
       {done.length ? (
         <section className="grid gap-3">
-          <Label>Finished · {done.length}</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label>Finished · {done.length}</Label>
+            {/* One press for the whole list instead of one per row. The games
+                stay installed; only the history goes. */}
+            <Button
+              size="sm"
+              onClick={() => {
+                for (const d of done) void api.remove(d.id).catch(() => {})
+              }}
+            >
+              <X className="size-3" />
+              Clear all
+            </Button>
+          </div>
           {done.map((d) => (
             <Row key={d.id} d={d} onOpenGame={onOpenGame} />
           ))}
