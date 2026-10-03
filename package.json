@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "app:dev": "tauri dev",
+    "app:dev:plain": "tauri dev -- --no-default-features --features dev-plain-chat-store",
     "app:build": "node scripts/build.mjs",
     "brand": "node scripts/brand.mjs"
   },

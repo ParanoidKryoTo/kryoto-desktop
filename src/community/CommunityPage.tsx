@@ -5,6 +5,7 @@ import { artSrc } from '@/lib/art'
 import { ArrowUpRight, Clock, Eye, MessageSquare, RotateCw, ShieldCheck, Users } from 'lucide-react'
 import { AsciiBar, Button, Caption, IconButton, Label, Matrix } from '@/ui'
 import { isTauri } from '@/lib/bridge'
+import { useFriends } from '@/hooks/useFriends'
 import { adultBlur, useShowAdult } from '@/lib/adult'
 import type { LibraryGame } from '@/lib/library'
 import { formatPlaytime } from '@/lib/format'
@@ -41,7 +42,7 @@ type Stats = {
     commentsToday: number
     commentsTotal: number
     topCommenters: { username: string | null; displayName: string | null; avatarUrl: string | null; count: number }[]
-    recent: { who: string; avatarUrl: string | null; gameSlug: string; gameTitle: string; body: string; createdAt: string }[]
+    recent: { who: string; username?: string | null; avatarUrl: string | null; gameSlug: string; gameTitle: string; body: string; createdAt: string }[]
   }
   testing: { verified: number; live: number; testers: number }
 }
@@ -110,8 +111,27 @@ function ago(iso: string) {
 let lastStats: { at: number; stats: Stats } | null = null
 const FRESH_MS = 60_000
 
+function withoutHidden(stats: Stats | null, hidden: string[]): Stats | null {
+  if (!stats || hidden.length === 0) return stats
+  const set = new Set(hidden.map((h) => h.toLowerCase()))
+  const out = (u: string | null | undefined) => Boolean(u && set.has(u.toLowerCase()))
+  return {
+    ...stats,
+    play: { ...stats.play, board: stats.play.board.filter((b) => !out(b.username)) },
+    talk: {
+      ...stats.talk,
+      topCommenters: stats.talk.topCommenters.filter((c) => !out(c.username)),
+      recent: stats.talk.recent.filter((c) => !out(c.username)),
+    },
+  }
+}
+
 export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame[]; onGame: (slug: string) => void; onProfile: (username: string) => void }) {
-  const [stats, setStats] = useState<Stats | null>(isTauri() ? (lastStats?.stats ?? null) : PREVIEW)
+  const [shared, setStats] = useState<Stats | null>(isTauri() ? (lastStats?.stats ?? null) : PREVIEW)
+  // kryo.to's numbers are the same for everyone; people with a block either
+  // way are left out here, on this side (the list comes with the friends report).
+  const hiddenList = useFriends()?.hidden
+  const stats = useMemo(() => withoutHidden(shared, hiddenList ?? []), [shared, hiddenList])
   const [error, setError] = useState<string | null>(null)
   const showAdult = useShowAdult()
   const online = useOnline()

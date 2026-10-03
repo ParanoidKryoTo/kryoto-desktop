@@ -230,6 +230,47 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Unread chat messages, on the tray icon's tooltip and (Windows) as a dot on
+/// the taskbar button; elsewhere as the dock/launcher badge where supported.
+pub fn set_unread_badge<R: Runtime>(app: &AppHandle<R>, unread: u32) {
+    let base = if cfg!(debug_assertions) { "Kryoto Desktop Dev" } else { "Kryoto Desktop" };
+    if let Some(tray) = app.tray_by_id("kryoto") {
+        let tip = match unread {
+            0 => base.to_string(),
+            1 => format!("{base} - 1 unread message"),
+            n => format!("{base} - {n} unread messages"),
+        };
+        let _ = tray.set_tooltip(Some(tip));
+    }
+    let Some(window) = app.get_webview_window("main") else { return };
+    #[cfg(windows)]
+    {
+        let _ = window.set_overlay_icon((unread > 0).then(unread_dot));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window.set_badge_count((unread > 0).then_some(i64::from(unread)));
+    }
+}
+
+/// A 16 px round dot for the taskbar overlay, drawn here (no asset to ship).
+#[cfg(windows)]
+fn unread_dot() -> tauri::image::Image<'static> {
+    const N: u32 = 16;
+    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
+    let c = (N as f32 - 1.0) / 2.0;
+    for y in 0..N {
+        for x in 0..N {
+            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
+            // White ring, then red fill, soft edge.
+            let (r, g, b) = if d > c - 2.0 { (255, 255, 255) } else { (229, 57, 53) };
+            let a = ((c + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    tauri::image::Image::new_owned(rgba, N, N)
+}
+
 /// The main window's close button: to the tray once signed in (Steam's
 /// default), unless Settings says quit. A move or resize closes an open menu
 /// and tells the shell when the window became (or stopped being) maximized or

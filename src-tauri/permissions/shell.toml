@@ -34,6 +34,8 @@ commands.allow = [
   "library_save",
   "library_remove",
   "game_launch",
+  "online_lobby",
+  "steam_join_lobby",
   "game_launch_preview",
   "game_running",
   "game_stop",

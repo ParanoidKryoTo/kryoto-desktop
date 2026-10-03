@@ -20,7 +20,7 @@ serde_json = "1"
 rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "cookies"] }
-tokio = { version = "1", features = ["sync", "fs", "io-util", "time"] }
+tokio = { version = "1", features = ["sync", "fs", "io-util", "time", "net", "macros"] }
 futures-util = "0.3"
 sevenz-rust = "0.6"
 sha2 = "0.10"
@@ -31,6 +31,33 @@ percent-encoding = "2"
 notify-rust = "4"
 tauri-plugin-updater = "2.13"
 tauri-plugin-process = "2.4"
+
+# Chat (FRIENDS-AND-CHAT.md). All cryptography lives in kryoto-messaging; this
+# app only drives it. Path dependencies while the repos sit side by side; CI
+# checks kryoto-messaging out next to this repo.
+km-core = { path = "../../kryoto-messaging/crates/km-core" }
+km-proto = { path = "../../kryoto-messaging/crates/km-proto" }
+km-store-sqlcipher = { path = "../../kryoto-messaging/crates/km-store-sqlcipher", default-features = false }
+# OS secure store: Windows Credential Manager, Linux Secret Service.
+keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+prost = "0.14"
+zeroize = "1.9"
+getrandom = "0.4"
+hex = "0.4"
+# No OS secure store (Linux without a Secret Service): chat secrets sealed
+# under a passphrase (Argon2id -> XChaCha20-Poly1305).
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+
+[features]
+default = ["sqlcipher"]
+# The real chat database: SQLCipher (needs Perl to build OpenSSL; CI has it).
+sqlcipher = ["km-store-sqlcipher/sqlcipher"]
+# LOCAL DEBUG BUILDS ONLY on machines without a full Perl: chat state is NOT
+# encrypted, and km-store-sqlcipher refuses to compile it in release.
+#   cargo test --no-default-features --features dev-plain-chat-store
+dev-plain-chat-store = ["km-store-sqlcipher/plain-sqlite-dev"]
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"

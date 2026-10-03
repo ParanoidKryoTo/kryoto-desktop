@@ -345,11 +345,48 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   )
   const playEntry = useCallback((game: LibraryGame, entry: number) => void lib.play(game.id, entry), [lib])
 
+  // "Join" on a game invite in chat: start the game (into the host's Steam
+  // lobby when the invite has one), ask Steam to join if it is already
+  // running, or open its page to install it.
+  const joinInvite = useCallback(
+    (invite: { slug: string; steamLobby: string; hostSteamId: string }) => {
+      const game = lib.games.find((g) => g.slug === invite.slug)
+      if (!game) {
+        openWeb(`/game/${encodeURIComponent(invite.slug)}`)
+        return
+      }
+      go({ kind: 'game', id: game.id })
+      if (lib.running.has(game.id)) {
+        if (invite.steamLobby && invite.hostSteamId) {
+          void call('steam_join_lobby', { lobby: invite.steamLobby, host: invite.hostSteamId }).catch(() => {})
+        }
+        return
+      }
+      const target = playTarget(game)
+      void lib.play(game.id, target === 'ask' ? null : target, invite.steamLobby || undefined)
+    },
+    [lib, go, openWeb],
+  )
+  const inviteGames = useMemo(
+    () =>
+      lib.games
+        .filter((g): g is LibraryGame & { slug: string } => !!g.slug)
+        .map((g) => ({ id: g.id, slug: g.slug, title: g.title, cover: g.cover, running: lib.running.has(g.id) })),
+    [lib.games, lib.running],
+  )
+
   // `kryoto://` links from kryo.to (src-tauri/src/links.rs): a game's page, or
   // starting it - through the same Play as the library, so a game with more
   // than one mode still asks which. Not installed: its page, to get it.
+  // kryoto://chat/<username>: the Friends page opens that conversation.
+  const [chatWith, setChatWith] = useState<{ username: string; at: number } | null>(null)
   const openLink = useCallback(
     (link: { action: string; slug: string }) => {
+      if (link.action === 'chat') {
+        setChatWith({ username: link.slug, at: Date.now() })
+        go({ kind: 'friends' })
+        return
+      }
       const game = lib.games.find((g) => g.slug === link.slug)
       if (link.action === 'play' && game) {
         go({ kind: 'game', id: game.id })
@@ -630,7 +667,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   } else if (view.kind === 'friends') {
     content = (
       <div className="absolute inset-0 flex bg-background">
-        <FriendsPage account={account} onProfile={guest ? signIn : () => openWeb(`/user/${username}`)} onDiscord={() => void openExternal(DISCORD_URL)} />
+        <FriendsPage account={account} onProfile={guest ? signIn : () => openWeb(`/user/${username}`)} onDiscord={() => void openExternal(DISCORD_URL)} onWeb={openWeb} chatWith={chatWith} games={inviteGames} onJoinInvite={joinInvite} />
       </div>
     )
   } else if (view.kind === 'downloads') {

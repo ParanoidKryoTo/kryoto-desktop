@@ -3,6 +3,7 @@
 //!
 //!   kryoto://game/<slug>   the game's page in the Store
 //!   kryoto://play/<slug>   start it when it is installed, else its page
+//!   kryoto://chat/<user>   open (or start) a chat with that kryo.to username
 //!
 //! The scheme is registered for the current user at start (no admin rights).
 //! Windows starts a new copy of the app for every link; that copy hands the
@@ -20,8 +21,9 @@ pub const EVENT: &str = "deep-link";
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
-    /// `game` or `play`.
+    /// `game`, `play` or `chat`.
     pub action: String,
+    /// A game slug, or for `chat` a username.
     pub slug: String,
 }
 
@@ -30,7 +32,16 @@ pub fn parse(raw: &str) -> Option<Link> {
     let rest = raw.trim().strip_prefix(&format!("{SCHEME}://"))?;
     let mut parts = rest.trim_end_matches('/').splitn(2, '/');
     let action = parts.next()?.to_ascii_lowercase();
-    let slug = parts.next()?.split(['?', '#']).next()?.to_ascii_lowercase();
+    let target = parts.next()?.split(['?', '#']).next()?;
+    if action == "chat" {
+        // kryo.to's username rule: 3-32 of letters, digits, _ . - (and never
+        // only dots, so it can never read as a path).
+        let ok = (3..=32).contains(&target.len())
+            && target.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            && !target.chars().all(|c| c == '.');
+        return ok.then(|| Link { action, slug: target.to_string() });
+    }
+    let slug = target.to_ascii_lowercase();
     let slug_ok = !slug.is_empty()
         && slug.len() <= 160
         && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
@@ -149,6 +160,15 @@ mod tests {
         assert_eq!(parse("kryoto://game/hades-ii"), Some(Link { action: "game".into(), slug: "hades-ii".into() }));
         assert_eq!(parse("kryoto://play/hades-ii/"), Some(Link { action: "play".into(), slug: "hades-ii".into() }));
         assert_eq!(parse("kryoto://PLAY/Hades-II?x=1").map(|l| l.slug), Some("hades-ii".into()));
+    }
+
+    #[test]
+    fn parses_chat_with_a_username() {
+        assert_eq!(parse("kryoto://chat/Mira_99"), Some(Link { action: "chat".into(), slug: "Mira_99".into() }));
+        assert_eq!(parse("kryoto://chat/a.b-c/").map(|l| l.slug), Some("a.b-c".into()));
+        for bad in ["kryoto://chat/ab", "kryoto://chat/...", "kryoto://chat/a b c", "kryoto://chat/<script>", &format!("kryoto://chat/{}", "a".repeat(33))] {
+            assert_eq!(parse(bad), None, "{bad}");
+        }
     }
 
     #[test]

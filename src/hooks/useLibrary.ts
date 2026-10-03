@@ -83,10 +83,10 @@ export function useLibrary() {
     }
   }, [reload])
 
-  const play = useCallback(async (id: string, entry: number | null) => {
+  const play = useCallback(async (id: string, entry: number | null, joinLobby?: string) => {
     setError(null)
     try {
-      await library.launch(id, entry)
+      await library.launch(id, entry, joinLobby)
     } catch (e) {
       setError(errorText(e))
     }

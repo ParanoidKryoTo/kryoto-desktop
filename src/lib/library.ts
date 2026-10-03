@@ -203,7 +203,8 @@ export const library = {
     call<LibraryGame>('library_add', { exePath, game: { ...BLANK_GAME, ...game } }),
   save: (game: LibraryGame) => call<LibraryGame>('library_save', { game }),
   remove: (id: string, deleteFiles: boolean) => call<boolean>('library_remove', { id, deleteFiles }),
-  launch: (id: string, entry: number | null) => call<void>('game_launch', { id, entry }),
+  /** `joinLobby`: a Steam lobby id from a game invite (Kryoto Online games). */
+  launch: (id: string, entry: number | null, joinLobby?: string) => call<void>('game_launch', { id, entry, joinLobby: joinLobby ?? null }),
   preview: (game: LibraryGame, entry: number | null) => call<string>('game_launch_preview', { game, entry }),
   running: () => call<string[]>('game_running'),
   stop: (id: string) => call<void>('game_stop', { id }),

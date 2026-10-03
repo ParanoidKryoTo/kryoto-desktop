@@ -1,0 +1,49 @@
+# Chat: the shell's own view only (capabilities/chat.json grants this to the
+# `main` web view and nothing else). A Store page must never reach these: they
+# act on the account's end-to-end encrypted chat. lib.rs has tests that fail
+# if a chat command shows up in the Store's permissions or capabilities.
+
+[[permission]]
+identifier = "allow-chat"
+description = "Chat on this PC: turn it on or off, read and send messages, settings."
+commands.allow = [
+  "chat_status",
+  "chat_enable",
+  "chat_remove_device",
+  "chat_set_context",
+  "chat_conversations",
+  "chat_messages",
+  "chat_send",
+  "chat_send_gif",
+  "chat_edit",
+  "chat_delete",
+  "chat_react",
+  "chat_typing",
+  "chat_mark_read",
+  "chat_search",
+  "chat_settings_get",
+  "chat_settings_set",
+  "chat_gif_search",
+  "chat_message_request",
+  "chat_message_request_respond",
+  "chat_verify_info",
+  "chat_verify_mark",
+  "chat_identity_ack",
+  "chat_backup_status",
+  "chat_backup_create",
+  "chat_backup_delete",
+  "chat_devices",
+  "chat_device_revoke",
+  "chat_restore",
+  "chat_reset_identity",
+  "chat_unlock",
+  "chat_send_invite",
+  "chat_report",
+  "chat_export_history",
+  "chat_groups",
+  "chat_people",
+  "chat_group_create",
+  "chat_group_rename",
+  "chat_group_add",
+  "chat_group_remove",
+]

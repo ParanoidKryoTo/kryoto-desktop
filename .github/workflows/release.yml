@@ -116,6 +116,11 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # Chat's cryptography (Cargo path dependency ../kryoto-messaging).
+      # Goes away once the dependency becomes a pinned git revision.
+      - name: Fetch kryoto-messaging
+        shell: bash
+        run: git clone --depth 1 https://github.com/official-kryo-to/kryoto-messaging.git ../kryoto-messaging
       - uses: pnpm/action-setup@v4
         with:
           version: 10

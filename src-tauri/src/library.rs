@@ -368,12 +368,22 @@ pub fn game_running(running: State<'_, Running>) -> Vec<String> {
 /// Start a game. `entry` is the Steam launch entry picked, or `None` for the
 /// release default.
 #[tauri::command(async)]
-pub fn game_launch(app: AppHandle, running: State<'_, Running>, id: String, entry: Option<usize>) -> Result<(), String> {
+pub fn game_launch(
+    app: AppHandle,
+    running: State<'_, Running>,
+    id: String,
+    entry: Option<usize>,
+    join_lobby: Option<String>,
+) -> Result<(), String> {
     if running.0.lock().map(|m| m.contains_key(&id)).unwrap_or(false) {
         return Err("It is already running.".into());
     }
     let game = load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
     let mut plan = plan_for(&app, &game, entry)?;
+    // From a game invite: start straight into the host's Steam lobby.
+    if let Some(arg) = join_lobby.as_deref().and_then(crate::lobbies::connect_arg) {
+        plan.game_args = format!("{} {arg}", plan.game_args).trim().to_string();
+    }
     if !plan.exe.is_file() {
         // The exe moved inside the folder (an update re-laid it out, or the
         // archive unpacked one level deeper than the release says). Look for a

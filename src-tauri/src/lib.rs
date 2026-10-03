@@ -1,11 +1,13 @@
 mod addons;
 mod art;
+mod chat;
 mod compat;
 mod downloads;
 mod handoff;
 mod launch;
 mod library;
 mod links;
+mod lobbies;
 #[cfg(target_os = "linux")]
 mod linux_overlay;
 mod logging;
@@ -55,6 +57,15 @@ struct Account {
     /// A supporter (or bought "no ads"): the client does not ask them to donate.
     #[serde(default)]
     supporter: bool,
+    /// Chat is rolled out to this account (kryo.to feature flag `chat`).
+    #[serde(default)]
+    chat: bool,
+    /// Friends are rolled out to this account (kryo.to feature flag `friends`).
+    #[serde(default)]
+    friends: bool,
+    /// Group chats are rolled out to this account (flag `chat_groups`).
+    #[serde(default)]
+    groups: bool,
 }
 
 /// State reported by the page-side script.
@@ -94,6 +105,10 @@ struct BrowserReport {
     /// account marked Playing, Plan to Play, Favorite and so on.
     #[serde(default)]
     saved: Option<serde_json::Value>,
+    /// `{ friends, incoming, outgoing }` from kryo.to's `/api/friends`, when
+    /// the account has the friends feature.
+    #[serde(default)]
+    friends: Option<serde_json::Value>,
 }
 
 fn some_account<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Account>>, D::Error> {
@@ -377,6 +392,9 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           displayName: u.displayName || null,
           avatarUrl: u.avatarUrl || null,
           supporter: !!(u.isSupporter || (Array.isArray(u.perks) && u.perks.indexOf('ad_free') >= 0)),
+          chat: !!(u.features && u.features.chat),
+          friends: !!(u.features && u.features.friends),
+          groups: !!(u.features && u.features.chat_groups),
           appearance: {
             palette: u.appearancePalette || null,
             radius: u.appearanceRadius || null,
@@ -386,6 +404,22 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           }
         } : null });
         if (!u) return;
+        if (u.features && u.features.friends) {
+          const face = (p) => ({ id: p.id, username: p.username, displayName: p.displayName || null, avatarUrl: p.avatarUrl || null, supporter: !!p.supporter });
+          Promise.all([json('/api/friends'), json('/api/blocks/hidden').catch(() => ({ usernames: [] }))])
+            .then(([f, h]) => send({ friends: {
+              hidden: (h.usernames || []).slice(0, 5000).map(String),
+              friends: (f.friends || []).slice(0, 500).map((p) => Object.assign(face(p), { favourite: !!p.favourite, nickname: p.nickname || null, muted: !!p.muted, online: !!p.online, playing: p.playing && typeof p.playing.slug === 'string' ? { slug: p.playing.slug, title: String(p.playing.title || p.playing.slug), cover: p.playing.cover || null } : null })),
+              incoming: (f.incoming || []).slice(0, 100).map((p) => Object.assign(face(p), { requestId: p.requestId })),
+              outgoing: (f.outgoing || []).length,
+              messageRequests: {
+                incoming: ((f.messageRequests && f.messageRequests.incoming) || []).slice(0, 100).map(face),
+                outgoing: ((f.messageRequests && f.messageRequests.outgoing) || []).slice(0, 100).map(face),
+                accepted: ((f.messageRequests && f.messageRequests.accepted) || []).slice(0, 500).map(face)
+              }
+            } }))
+            .catch(() => {});
+        }
         json('/api/notifications?limit=8')
           .then((n) => send({ inbox: { unreadCount: n.unreadCount || 0, notifications: (n.notifications || []).slice(0, 8) } }))
           .catch(() => {});
@@ -738,6 +772,9 @@ fn report_catalog_state(app: tauri::AppHandle, state: BrowserReport) -> Result<(
             player_name::remember_account(&app, account.as_ref().map(|a| a.username.as_str()));
             let _ = app.emit_to("main", "account-state", account);
         }
+        if let Some(friends) = state.friends {
+            let _ = app.emit_to("main", "friends-state", friends);
+        }
         if let Some(inbox) = state.inbox {
             let _ = app.emit_to("main", "inbox-state", inbox);
         }
@@ -924,6 +961,7 @@ pub fn run() {
         .manage(storage::Moving::default())
         .manage(menus::Menus::default())
         .manage(PendingDownload::default())
+        .manage(chat::ChatState::default())
         .setup(move |app| {
             logging::init(app.handle());
             logging::start_reporter(app.handle().clone());
@@ -934,6 +972,8 @@ pub fn run() {
             if let Some(l) = listener.take() {
                 system::serve_instance(app.handle().clone(), l);
             }
+            // Chat reconnects on its own if it was turned on here before.
+            chat::autostart(app.handle());
             if let Err(e) = system::build_tray(app.handle()) {
                 logging::error("tray", &e.to_string());
             }
@@ -1037,6 +1077,47 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             links::take_pending_link,
+            chat::chat_status,
+            chat::chat_enable,
+            chat::chat_remove_device,
+            chat::chat_set_context,
+            chat::chat_conversations,
+            chat::chat_messages,
+            chat::chat_send,
+            chat::chat_send_gif,
+            chat::chat_edit,
+            chat::chat_delete,
+            chat::chat_react,
+            chat::chat_typing,
+            chat::chat_mark_read,
+            chat::chat_search,
+            chat::chat_settings_get,
+            chat::chat_settings_set,
+            chat::chat_gif_search,
+            chat::chat_message_request,
+            chat::chat_message_request_respond,
+            chat::chat_verify_info,
+            chat::chat_verify_mark,
+            chat::chat_identity_ack,
+            chat::chat_backup_status,
+            chat::chat_backup_create,
+            chat::chat_backup_delete,
+            chat::chat_devices,
+            chat::chat_device_revoke,
+            chat::chat_restore,
+            chat::chat_reset_identity,
+            chat::chat_unlock,
+            chat::chat_send_invite,
+            chat::chat_report,
+            chat::chat_export_history,
+            chat::chat_groups,
+            chat::chat_people,
+            chat::chat_group_create,
+            chat::chat_group_rename,
+            chat::chat_group_add,
+            chat::chat_group_remove,
+            lobbies::online_lobby,
+            lobbies::steam_join_lobby,
             store_mount,
             store_visible,
             store_sign_out,
@@ -1120,7 +1201,12 @@ mod tests {
         let src = include_str!("lib.rs");
         let start = src.find("generate_handler![").unwrap() + "generate_handler![".len();
         let end = start + src[start..].find(']').unwrap();
-        let allowed = format!("{}{}", include_str!("../permissions/shell.toml"), include_str!("../permissions/catalog.toml"));
+        let allowed = format!(
+            "{}{}{}",
+            include_str!("../permissions/shell.toml"),
+            include_str!("../permissions/catalog.toml"),
+            include_str!("../permissions/chat.toml")
+        );
         let missing: Vec<&str> = src[start..end]
             .split(',')
             .map(|c| c.trim().rsplit("::").next().unwrap_or("").trim())
@@ -1128,6 +1214,28 @@ mod tests {
             .filter(|c| !allowed.contains(&format!("\"{c}\"")))
             .collect();
         assert!(missing.is_empty(), "add to permissions/shell.toml: {missing:?}");
+    }
+
+    /// Chat acts on the account's encrypted messages and keys: only the
+    /// shell's own `main` view may call it. A Store page (any remote site) and
+    /// the menu view must never be granted a chat command.
+    #[test]
+    fn chat_is_out_of_reach_of_store_pages() {
+        let catalog_perms = include_str!("../permissions/catalog.toml");
+        let shell_perms = include_str!("../permissions/shell.toml");
+        let catalog_cap = include_str!("../capabilities/catalog.json");
+        let default_cap = include_str!("../capabilities/default.json");
+        let chat_cap = include_str!("../capabilities/chat.json");
+        for perms in [catalog_perms, shell_perms] {
+            assert!(!perms.contains("\"chat_"), "a chat command is outside permissions/chat.toml");
+        }
+        for cap in [catalog_cap, default_cap] {
+            assert!(!cap.contains("allow-chat"), "allow-chat granted outside capabilities/chat.json");
+        }
+        let cap: serde_json::Value = serde_json::from_str(chat_cap).unwrap();
+        assert_eq!(cap["webviews"], serde_json::json!(["main"]));
+        assert_eq!(cap["windows"], serde_json::json!(["main"]));
+        assert!(cap.get("remote").is_none(), "chat must never be granted to remote URLs");
     }
 
     /// A plugin's page script runs in every frame of every web view, the Store's
