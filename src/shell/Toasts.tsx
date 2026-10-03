@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Bell, Play } from 'lucide-react'
+import { Play } from 'lucide-react'
+import { Matrix } from '@/ui'
 import { on } from '@/lib/bridge'
 import type { Notice } from '@/lib/downloads'
 import { notify } from '@/lib/notify'
+import { chime } from '@/lib/sound'
 
 export type Toast = Notice & { key: number }
 
@@ -23,6 +25,8 @@ export function useToasts() {
     void on<Notice>('notify', (n) => {
       push(n)
       if (!document.hasFocus()) void notify(n.title, n.body)
+      // In front, a game becoming ready gets the optional sound instead.
+      else if (n.gameId) chime()
     }).then((fn) => (cancelled ? fn() : (stop = fn)))
     return () => {
       cancelled = true
@@ -51,7 +55,7 @@ export function Toasts({ toasts, onOpen, onDismiss }: { toasts: Toast[]; onOpen:
           className="kryo-toast kryo-radius grid w-80 grid-cols-[36px_1fr] items-center gap-3 border border-border bg-card p-3 text-left shadow-2xl shadow-black/60"
         >
           <span className="kryo-pill grid size-9 place-items-center bg-primary text-primary-foreground">
-            {t.gameId ? <Play className="size-4" /> : <Bell className="size-4" />}
+            {t.gameId ? <Play className="size-4" /> : <Matrix state="info" className="size-3.5" />}
           </span>
           <span className="min-w-0">
             <span className="block truncate text-xs font-bold text-foreground">{t.title}</span>

@@ -136,7 +136,8 @@
     -webkit-font-smoothing: antialiased;
     user-select: none;
   }
-  ::selection { background: oklch(0.5 0 0 / 0.25); }
+  /* The reader's accent, as on kryo.to. */
+  ::selection { background: color-mix(in oklch, var(--primary) 26%, transparent); }
 
   /* The radius preference, applied - the site's rule, with its reason: a
      plain selector list, because Preflight pins controls square with real
@@ -149,7 +150,13 @@
     border-radius: var(--kryo-radius);
     font: inherit;
   }
-  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  /* kryo.to's focus mark: the ink colour, 2px off the edge. The Store beside
+     this is the site, so tabbing from a Library row into a Store link must
+     not change what "focused" looks like. */
+  :focus-visible { outline: 2px solid var(--foreground); outline-offset: 2px; }
+  /* Inside a wrapper that clips (a joined control, the copy button on a
+     command line) a ring outside would be cut away: drawn inside instead. */
+  :is(.overflow-hidden, .overflow-clip) > :focus-visible { outline-offset: -2px; }
   button:not(:disabled), [role='button']:not(:disabled), a[href] { cursor: pointer; }
   input, textarea { cursor: text; user-select: text; }
   :disabled { cursor: not-allowed; }
@@ -192,6 +199,86 @@
   animation: kryo-shimmer 1.4s ease-in-out infinite;
 }
 .kryo-toast { animation: kryo-toast 260ms var(--kryo-ease-out) both; }
+
+/* ---------------------------------------------------------------------------
+   The 3x3 matrix (ui/Matrix.tsx, kryo.to's verbatim).
+
+   Kryoto's tiny teletext alphabet for system state: working, arriving,
+   checking, waiting, done, failed, gone. Nine dots, four levels of ink, and
+   a handful of motions that all move in hard steps - a matrix switches, it
+   never glides. The component sets each dot's still-frame ink as `--o` and,
+   when the state moves, its animation inline; everything those animations
+   need is here.
+
+   The unlit level is a trace, not nothing, so the grid stays legible at rest
+   and the glyph keeps its footprint whatever it says.
+--------------------------------------------------------------------------- */
+.kryo-matrix {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 14%;
+  vertical-align: middle;
+}
+.kryo-matrix > i {
+  border-radius: 20%;
+  background: currentColor;
+  opacity: var(--o, 0.14);
+}
+
+/* orbit: a head and a two-step tail, one ring cell per 110ms. */
+@keyframes kryo-m-orbit {
+  0% { opacity: 1; }
+  12.5% { opacity: 0.55; }
+  25% { opacity: 0.3; }
+  37.5%, 100% { opacity: 0.14; }
+}
+/* sync: the same, twice round at once - two heads, opposite each other. */
+@keyframes kryo-m-orbit2 {
+  0%, 50% { opacity: 1; }
+  12.5%, 62.5% { opacity: 0.55; }
+  25%, 75% { opacity: 0.3; }
+  37.5%, 87.5%, 100% { opacity: 0.14; }
+}
+/* fill / signal / tick: four beats - nothing, one, two, all - and again. A
+   cell lights on its stage's beat and holds until the round ends. */
+@keyframes kryo-m-stage-1 { 0% { opacity: 0.14; } 25%, 100% { opacity: 1; } }
+@keyframes kryo-m-stage-2 { 0% { opacity: 0.14; } 50%, 100% { opacity: 1; } }
+@keyframes kryo-m-stage-3 { 0% { opacity: 0.14; } 75%, 100% { opacity: 1; } }
+/* scan: a lit column crossing left to right, its last position fading. */
+@keyframes kryo-m-scan {
+  0% { opacity: 1; }
+  33.333% { opacity: 0.3; }
+  66.666%, 100% { opacity: 0.14; }
+}
+/* blink: on, off. The checker runs it on alternate cells, out of phase. */
+@keyframes kryo-m-blink {
+  0% { opacity: 1; }
+  50%, 100% { opacity: 0.14; }
+}
+/* resolve: a shape's dots appear one at a time in stroke order, then hold. */
+@keyframes kryo-m-resolve {
+  from { opacity: 0.14; }
+  to { opacity: var(--o); }
+}
+
+/* Still frames. Every state's `--o` is chosen to say the same thing without
+   moving, so stopping the animation is the whole job. Both the system
+   setting and the site's own, because the site's global reduced-motion rule
+   would otherwise run each cycle once and leave the dots on its last frame. */
+@media (prefers-reduced-motion: reduce) {
+  .kryo-matrix > i { animation: none !important; }
+}
+html[data-motion='reduced'] .kryo-matrix > i { animation: none !important; }
+
+/* The wink (ui/Busy.tsx): one beat of a K, on a long wait. */
+[data-wink='k'] .kryo-matrix > i {
+  animation-play-state: paused !important;
+  opacity: 0.14 !important;
+}
+[data-wink='k'] .kryo-matrix > i:is(:nth-child(1), :nth-child(3), :nth-child(4), :nth-child(5), :nth-child(7), :nth-child(9)) {
+  opacity: 1 !important;
+}
 .kryo-blink { animation: kryo-blink 1s steps(1) infinite; }
 
 /* `.drag` areas move the window and `.no-drag` opts back out: done by

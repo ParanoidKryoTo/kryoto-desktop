@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUpToLine, ChevronDown, ChevronUp, Download, HeartHandshake, Loader2, Pause, Play, RotateCw, X } from 'lucide-react'
-import { AsciiBar, AsciiSpark, Button, Caption, IconButton, Label } from '@/ui'
+import { ArrowUpToLine, ChevronDown, ChevronUp, Download, HeartHandshake, Pause, Play, RotateCw, X } from 'lucide-react'
+import { AsciiBar, AsciiSpark, Busy, Button, Caption, IconButton, Label, Matrix, type MatrixState } from '@/ui'
 import { downloads as api, formatBytes, formatEta, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { Art } from '@/library/Art'
 import { capsulesFor } from '@/lib/library'
@@ -120,8 +120,34 @@ function usePending(d: Dl) {
   return { pending, run }
 }
 
+/**
+ * A download's state as one glyph of the matrix alphabet - the same family
+ * as the site's toasts and the Store's loading marks. Downloading is the one
+ * determinate state: the glyph fills, bottom row first, with the real
+ * progress, so a glance at the list says how far each one is.
+ */
+const GLYPH: Partial<Record<Dl['status'], MatrixState>> = {
+  queued: 'queue',
+  resolving: 'connect',
+  verifying: 'scan',
+  extracting: 'process',
+  paused: 'idle',
+  failed: 'error',
+  installed: 'success',
+  canceled: 'unavailable',
+}
+
+function StatusGlyph({ d, className }: { d: Dl; className?: string }) {
+  const tone =
+    d.status === 'failed' ? 'text-destructive' : d.status === 'installed' ? 'text-success' : 'text-foreground'
+  if (d.status === 'downloading') {
+    return <Matrix progress={d.total ? d.received / d.total : 0} className={`${tone} ${className ?? ''}`} />
+  }
+  return <Matrix state={GLYPH[d.status] ?? 'busy'} className={`${tone} ${className ?? ''}`} />
+}
+
 function Spinner() {
-  return <Loader2 className="size-3 animate-spin" aria-hidden />
+  return <Busy className="size-3" />
 }
 
 function Current({ d }: { d: Dl }) {
@@ -137,7 +163,8 @@ function Current({ d }: { d: Dl }) {
       <div className="grid content-start gap-4">
         <div className="flex items-start justify-between gap-4">
           <div className="grid gap-1">
-            <Caption>
+            <Caption className="flex items-center gap-2">
+              <StatusGlyph d={d} className="size-3" />
               {phaseOf(d)}
               {d.addon ? ` · ${d.addon}` : ''}
               {d.mirror && d.status !== 'resolving' ? ` · from ${d.mirror.host}` : ''}
@@ -152,7 +179,7 @@ function Current({ d }: { d: Dl }) {
                 {pending === 'pause' ? 'Pausing' : 'Pause'}
               </Button>
               <IconButton label={pending === 'cancel' ? 'Cancelling' : 'Cancel'} disabled={Boolean(pending)} onClick={() => run('cancel', () => api.cancel(d.id))}>
-                {pending === 'cancel' ? <Loader2 className="size-3.5 animate-spin" /> : <X className="size-3.5" />}
+                {pending === 'cancel' ? <Busy className="size-3.5" /> : <X className="size-3.5" />}
               </IconButton>
             </div>
           ) : null}
@@ -213,7 +240,8 @@ function Row({
       <Art adult={d.meta.nsfw} src={capsulesFor(d.meta)[0]} fallback={capsulesFor(d.meta).slice(1)} title={d.meta.title} where="downloads" className="kryo-radius aspect-[460/215] w-full object-cover" />
       <div className="grid min-w-0 gap-1.5">
         <b className="truncate text-sm text-foreground">{d.meta.title}</b>
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+          <StatusGlyph d={d} className="size-2.5" />
           {status}
           {d.mirror ? ` · ${d.mirror.host}` : ''}
           {d.release ? ` · build ${d.release}` : ''}
@@ -228,7 +256,7 @@ function Row({
           <div className="flex items-center gap-1">
             {!queue.first ? (
               <IconButton label="Download now" onClick={() => run('now', () => api.move(d.id, 'now'))} disabled={Boolean(pending)}>
-                {pending === 'now' ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUpToLine className="size-3.5" />}
+                {pending === 'now' ? <Busy className="size-3.5" /> : <ArrowUpToLine className="size-3.5" />}
               </IconButton>
             ) : null}
             <IconButton label="Move up" disabled={queue.first} onClick={() => void api.move(d.id, 'up')}>

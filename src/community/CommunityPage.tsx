@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useOnline } from '@/lib/online'
 import { Art } from '@/library/Art'
 import { artSrc } from '@/lib/art'
-import { ArrowUpRight, Clock, Eye, MessageSquare, RotateCw, ShieldCheck, Users, WifiOff } from 'lucide-react'
-import { AsciiBar, Button, Caption, IconButton, Label } from '@/ui'
+import { ArrowUpRight, Clock, Eye, MessageSquare, RotateCw, ShieldCheck, Users } from 'lucide-react'
+import { AsciiBar, Button, Caption, IconButton, Label, Matrix } from '@/ui'
 import { isTauri } from '@/lib/bridge'
 import { adultBlur, useShowAdult } from '@/lib/adult'
 import type { LibraryGame } from '@/lib/library'
@@ -149,7 +149,7 @@ export function CommunityPage({ games, onGame, onProfile }: { games: LibraryGame
       <div className="grid grow place-content-center justify-items-center gap-4 text-center">
         {!online ? (
           <>
-            <WifiOff className="size-5 text-muted-foreground" />
+            <Matrix state="connect" className="size-5 text-muted-foreground" />
             <Label>Community</Label>
             <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
               What the community is playing comes from kryo.to, and this PC is offline. It shows up here by itself once the connection is back.

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { RotateCw } from 'lucide-react'
-import { AsciiBar, Button, Caption, Modal } from '@/ui'
+import { AsciiBar, Busy, Button, Caption, Modal } from '@/ui'
 import { explainUpdateError, updateFraction, updates, useUpdates } from '@/lib/updates'
 
 /**
@@ -88,7 +88,7 @@ export function UpdateCheck() {
     <div className="grid justify-items-center gap-2">
       <div className="flex gap-2">
         <Button size="sm" onClick={() => void updates.check()} disabled={state.status === 'checking' || state.status === 'downloading'}>
-          <RotateCw className={state.status === 'checking' ? 'size-3 animate-spin' : 'size-3'} />
+          {state.status === 'checking' ? <Busy className="size-3" /> : <RotateCw className="size-3" />}
           Check for updates
         </Button>
         {state.status === 'available' ? (

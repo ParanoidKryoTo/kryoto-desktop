@@ -45,7 +45,7 @@ export function BottomBar({
             <span className="max-w-40 truncate text-foreground">
               {active.status === 'downloading' ? active.meta.title : phaseOf(active)}
             </span>
-            <span className="kryo-ascii-art text-[11px] tracking-normal text-foreground">
+            <span aria-hidden className="kryo-ascii-art text-[11px] tracking-normal text-foreground">
               {asciiTrack(progressOf(active), 16)}
             </span>
             <span className="tabular-nums">

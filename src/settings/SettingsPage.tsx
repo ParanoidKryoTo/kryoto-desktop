@@ -9,6 +9,7 @@ import { browserNavigate, isTauri, mountStore, placeMainStore, STORE_HOME } from
 import type { Account } from '@/hooks/useAccount'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
 import { cn } from '@/lib/utils'
+import { chime, setSoundsOn, soundsOn } from '@/lib/sound'
 import { StoragePane } from '@/settings/StoragePane'
 import { CompatPane } from '@/settings/CompatPane'
 import { LogsPane } from '@/settings/LogsPane'
@@ -275,6 +276,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             </Section>
             <Check checked={s.deleteArchives} onChange={(v) => set('deleteArchives', v)} label="Delete the archive once a game is installed" />
             <Check checked={s.notifyDownloads} onChange={(v) => set('notifyDownloads', v)} label="Tell me when a game is ready to play" />
+            <SoundCheck />
             <Section title="New games install to" hint="Change it, or add folders on other drives, in Storage.">
               <p className="kryo-ascii-art select-text text-[11px] text-foreground">{s.libraryDir}</p>
             </Section>
@@ -367,5 +369,24 @@ function PlayerNameSection({ s, patch }: { s: Settings; patch: (p: Partial<Setti
         ) : null}
       </div>
     </Section>
+  )
+}
+
+/**
+ * The one sound (lib/sound.ts), off unless asked for. Turning it on plays it
+ * once, so the choice is made knowing what it sounds like.
+ */
+function SoundCheck() {
+  const [on, setOn] = useState(soundsOn)
+  return (
+    <Check
+      checked={on}
+      onChange={(v) => {
+        setOn(v)
+        setSoundsOn(v)
+        if (v) chime({ force: true })
+      }}
+      label="Play a short sound when a game is ready, while Kryoto Desktop is in front"
+    />
   )
 }

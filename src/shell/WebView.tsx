@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Lock, LockOpen, Plus, RotateCw, X, Library, WifiOff } from 'lucide-react'
-import { AsciiBar, Button } from '@/ui'
+import { Lock, LockOpen, Plus, RotateCw, X, Library } from 'lucide-react'
+import { AsciiBar, Button, Matrix } from '@/ui'
 import { isTauri, mountStore, setMainPlacer, STORE_HOME } from '@/lib/window'
 import { resolveUserInputToUrl } from '@/lib/browser'
 import type { BrowserPageState } from '@/hooks/useBrowserPage'
@@ -78,7 +78,7 @@ export function WebSlot({
     <div ref={slot} className="absolute inset-0 grid place-content-center justify-items-center gap-4 bg-background text-center">
       {offline ? (
         <>
-          <WifiOff className="size-6 text-muted-foreground" />
+          <Matrix state="connect" className="size-6 text-muted-foreground" />
           <p className="text-xs uppercase tracking-[0.25em] text-primary">The Store could not load</p>
           <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
             This PC is offline. Your library, installed games and settings all still work, and the Store comes back by itself

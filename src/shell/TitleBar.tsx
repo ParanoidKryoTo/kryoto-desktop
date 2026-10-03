@@ -1,6 +1,6 @@
-import { Bell, ChevronDown, Expand, Megaphone, Shrink, WifiOff } from 'lucide-react'
+import { Bell, ChevronDown, Expand, Megaphone, Shrink } from 'lucide-react'
 import { artSrc } from '@/lib/art'
-import { MenuButton, MenuList, type MenuEntry } from '@/ui'
+import { Matrix, MenuButton, MenuList, type MenuEntry } from '@/ui'
 import { KryoMark } from '@/ui/ascii/KryoMark'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
 import { closeWindow, isTauri, minimizeWindow, toggleFullscreen, toggleMaximize, useWindowState } from '@/lib/window'
@@ -68,7 +68,7 @@ export function TitleBar({
             title="No connection. The library, your games and settings work as usual; the Store and downloads wait for it."
             className="kryo-pill pointer-events-auto flex items-center gap-1.5 border border-border px-2.5 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground"
           >
-            <WifiOff className="size-3" />
+            <Matrix state="connect" className="size-3" />
             Offline
           </span>
         ) : null}

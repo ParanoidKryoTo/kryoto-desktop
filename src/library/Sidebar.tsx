@@ -215,7 +215,8 @@ export function Sidebar({
               >
                 <span className="truncate">{d.meta.title}</span>
                 <span className="kryo-ascii-art flex justify-between text-[10px] tracking-normal">
-                  <span>{asciiTrack(progressOf(d), 18)}</span>
+                  {/* Drawn for the eye; a screen reader hears the figure beside it. */}
+                  <span aria-hidden>{asciiTrack(progressOf(d), 18)}</span>
                   <span>{d.status === 'paused' ? 'paused' : `${Math.round(progressOf(d) * 100)}%`}</span>
                 </span>
               </button>

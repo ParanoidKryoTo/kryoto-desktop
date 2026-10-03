@@ -2,6 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { Check as CheckIcon, ChevronDown, Copy, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { isTauri } from '@/lib/bridge'
+
+export { Busy } from './Busy'
+export { Matrix, type MatrixState } from './Matrix'
 import { closeMenu, justClosed, onPopupChange, openMenu, popupOpen } from '@/lib/popup'
 
 /**

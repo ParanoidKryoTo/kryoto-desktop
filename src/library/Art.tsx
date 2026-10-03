@@ -1,7 +1,7 @@
-import { Loader2 } from 'lucide-react'
 import { adultBlur, useShowAdult } from '@/lib/adult'
 import { useArt } from '@/lib/art'
 import { cn } from '@/lib/utils'
+import { Busy } from '@/ui'
 
 /**
  * A game's picture: the first of `src` and `fallback` that exists, through
@@ -70,7 +70,7 @@ export function GameBanner({
     <div className="relative h-80 overflow-hidden bg-card">
       {hero.status === 'loading' ? (
         <div className="absolute inset-0 grid place-items-center text-muted-foreground">
-          <Loader2 className="size-5 animate-spin" />
+          <Busy className="size-5" />
         </div>
       ) : hero.src ? (
         <img src={hero.src} alt="" className={cn('kryo-fade absolute inset-0 size-full object-cover object-top', adultBlur(adult, showAdult))} />

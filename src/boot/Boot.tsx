@@ -61,7 +61,12 @@ export function Splash({ onRevealed }: { onRevealed: () => void }) {
           <AsciiBar fraction={null} cells={16} showPct={false} className="text-muted-foreground" />
         </div>
       </div>
-      <p className="pointer-events-none pb-5 text-center text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
+      {/* The maker's mark on the line where the app names itself, as the
+          site's footer does: which build of Kryoto this is. */}
+      <p className="pointer-events-none flex items-baseline justify-center gap-2 pb-5 text-center text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
+        <span aria-hidden className="kryo-ascii-art font-bold tracking-tight opacity-60">
+          K//
+        </span>
         Kryoto Desktop {__APP_VERSION__}
       </p>
     </Box>
