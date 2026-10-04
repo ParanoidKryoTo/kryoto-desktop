@@ -97,7 +97,7 @@ export function ReportDialog({
                 label={
                   <span className="text-xs">
                     <b>{m.outgoing ? 'You' : peer.name}:</b>{' '}
-                    {m.kind === 'gif' ? 'GIF' : m.kind === 'invite' ? 'Game invite' : m.body.slice(0, 140)}
+                    {m.kind === 'gif' ? 'GIF' : m.kind === 'invite' ? 'Game invite' : m.kind === 'file' ? 'A file' : m.body.slice(0, 140)}
                   </span>
                 }
               />

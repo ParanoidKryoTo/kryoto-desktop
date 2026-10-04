@@ -49,6 +49,8 @@ pub enum ChatEvent {
     ReadElsewhere { conversation_id: String },
     /// A group's members or name changed.
     GroupChanged { group_id: String },
+    /// Voice call signalling from someone (offer, answer, ice, hangup, decline, busy).
+    Call { user_id: String, call_id: String, kind: String, payload: String },
     /// Something worth a desktop notification (already filtered for mutes).
     Notify { conversation_id: String, sender_user: String, preview: Option<String>, group_name: Option<String> },
 }

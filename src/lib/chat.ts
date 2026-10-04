@@ -83,8 +83,8 @@ export type ChatMessage = {
   outgoing: boolean
   sentAt: number
   receivedAt: number
-  /** "text", or "gif"/"invite" with `body` as JSON. */
-  kind: 'text' | 'gif' | 'invite'
+  /** "text", or "gif"/"invite"/"file" with `body` as JSON. */
+  kind: 'text' | 'gif' | 'invite' | 'file'
   body: string
   replyTo: string | null
   editedAt: number | null
@@ -118,6 +118,19 @@ export const chatMessages = (peer: string, before?: number) => call<ChatMessage[
 export const chatSend = (peer: string, text: string, replyTo?: string | null) =>
   call<ChatMessage>('chat_send', { peer, text, replyTo: replyTo ?? null })
 export const chatSendGif = (peer: string, gif: Gif) => call<ChatMessage>('chat_send_gif', { peer, gif })
+/** Pick a file and send it (encrypted). Null when the dialog was cancelled. */
+export const chatSendFile = (peer: string) => call<ChatMessage | null>('chat_send_file', { peer })
+export const chatFileSave = (msg: string) => call<string | null>('chat_file_save', { msg })
+export const chatFilePreview = (msg: string) => call<string>('chat_file_preview', { msg })
+export type FileInfo = { name: string; mime: string; size: number }
+export function parseFile(body: string): FileInfo | null {
+  try {
+    const f = JSON.parse(body) as FileInfo
+    return typeof f.name === 'string' ? f : null
+  } catch {
+    return null
+  }
+}
 export const chatSendInvite = (peer: string, invite: Omit<Invite, 'expiresAt'>) =>
   call<ChatMessage>('chat_send_invite', { peer, invite: { ...invite, expiresAt: 0 } })
 /** The Steam lobby a running game is in, if Kryoto Online reported one. */

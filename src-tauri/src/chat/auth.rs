@@ -213,6 +213,19 @@ pub async fn people(base: &str, token: &str, ids: &[u64]) -> Result<serde_json::
     r.json().await.map_err(|_| "kryo.to sent an unexpected answer.".to_string())
 }
 
+/// A kryo.to API call with the chat sign-in: the public room.
+pub async fn api(base: &str, token: &str, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    let mut req = client().request(method, format!("{base}{path}")).bearer_auth(token);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.map_err(|e| format!("Could not reach kryo.to: {e}"))?;
+    if !r.status().is_success() {
+        return Err(error_of(r).await);
+    }
+    r.json().await.map_err(|_| "kryo.to sent an unexpected answer.".to_string())
+}
+
 /// Send a chat report (messages the person picked, decrypted here) to staff.
 pub async fn report(base: &str, token: &str, payload: &serde_json::Value) -> Result<(), String> {
     let r = client()

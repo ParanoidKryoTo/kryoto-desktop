@@ -75,6 +75,39 @@ fn gateway_url() -> String {
     "wss://ws.kryo.to/v1/ws".to_string()
 }
 
+/// The gateway's https origin (attachments), from its WebSocket address.
+fn gateway_http() -> String {
+    let ws = gateway_url();
+    let base = ws.strip_suffix("/v1/ws").unwrap_or(&ws);
+    if let Some(rest) = base.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = base.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// A native file dialog (built on the main thread, awaited off it).
+async fn file_dialog(window: &tauri::Window, save_as: Option<String>) -> Result<Option<PathBuf>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let parent = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let dialog = rfd::AsyncFileDialog::new().set_parent(&parent);
+            type Picked = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>;
+            let picked: Picked = match save_as {
+                Some(name) => Box::pin(dialog.set_title("Save file").set_file_name(name).save_file()),
+                None => Box::pin(dialog.set_title("Send a file (up to 25 MB)").pick_file()),
+            };
+            std::thread::spawn(move || {
+                let _ = tx.send(tauri::async_runtime::block_on(picked).map(|h| h.path().to_path_buf()));
+            });
+        })
+        .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "The file dialog closed unexpectedly.".to_string())
+}
+
 /// What the engine reports, turned into app events and notifications.
 fn emitter(app: AppHandle) -> types::Emit {
     Arc::new(move |event: ChatEvent| match event {
@@ -104,6 +137,23 @@ fn emitter(app: AppHandle) -> types::Emit {
         }
         ChatEvent::GroupChanged { group_id } => {
             let _ = app.emit_to("main", "chat-group-changed", serde_json::json!({ "groupId": group_id }));
+        }
+        ChatEvent::Call { user_id, call_id, kind, payload } => {
+            if kind == "offer" {
+                // Ring: bring the window up, and tell the person if it was hidden.
+                let focused = app.get_webview_window("main").and_then(|w| w.is_focused().ok()).unwrap_or(false);
+                if !focused {
+                    let state = app.state::<ChatState>();
+                    let name = state.people.lock().expect("people").0.iter().find(|p| p.id == user_id).map(|p| p.name.clone());
+                    crate::system::os_notify(app.clone(), format!("{} is calling", name.unwrap_or_else(|| "Someone".into())), None);
+                    crate::system::show_main(&app);
+                }
+            }
+            let _ = app.emit_to(
+                "main",
+                "chat-call",
+                serde_json::json!({ "userId": user_id, "callId": call_id, "kind": kind, "payload": payload }),
+            );
         }
         ChatEvent::Notify { conversation_id, sender_user, preview, group_name } => {
             // Not while the window is in front: the message is on screen.
@@ -581,6 +631,99 @@ pub async fn chat_report(app: AppHandle, state: State<'_, ChatState>, report: Re
     let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
     let payload = serde_json::json!({ "userId": peer, "reason": reason, "note": note, "messages": picked, "block": block });
     auth::report(&api_base(&app), &token, &payload).await
+}
+
+// ---- voice calls -----------------------------------------------------------------
+
+/// Send call signalling (the shell's WebRTC side does the media).
+#[tauri::command]
+pub async fn chat_call_signal(state: State<'_, ChatState>, peer: String, call_id: String, kind: String, payload: String) -> Result<(), String> {
+    use km_proto::CallKind;
+    let kind = match kind.as_str() {
+        "offer" => CallKind::Offer,
+        "answer" => CallKind::Answer,
+        "ice" => CallKind::Ice,
+        "hangup" => CallKind::Hangup,
+        "decline" => CallKind::Decline,
+        "busy" => CallKind::Busy,
+        _ => return Err("Not a call signal.".into()),
+    };
+    let id = hex::decode(&call_id).ok().filter(|b| b.len() == 16).ok_or("Not a call id.")?;
+    current(&state)?.send_call(user_id(&peer)?, id, kind, payload).await.map_err(|e| e.to_string())
+}
+
+/// STUN/TURN servers for calls, from kryo.to (TURN credentials are short-lived).
+#[tauri::command]
+pub async fn chat_ice_servers(app: AppHandle) -> Result<serde_json::Value, String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    auth::api(&api_base(&app), &token, reqwest::Method::GET, "/api/chat/ice", None).await
+}
+
+// ---- the public room (not end-to-end encrypted) ---------------------------------
+
+/// Messages in the public room (newest, or only those after `after`).
+#[tauri::command]
+pub async fn room_list(app: AppHandle, after: Option<String>) -> Result<serde_json::Value, String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    let path = match after.filter(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit())) {
+        Some(a) => format!("/api/chat/room?after={a}"),
+        None => "/api/chat/room".to_string(),
+    };
+    auth::api(&api_base(&app), &token, reqwest::Method::GET, &path, None).await
+}
+
+#[tauri::command]
+pub async fn room_post(app: AppHandle, text: String) -> Result<serde_json::Value, String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    auth::api(&api_base(&app), &token, reqwest::Method::POST, "/api/chat/room", Some(serde_json::json!({ "text": text }))).await
+}
+
+#[tauri::command]
+pub async fn room_delete(app: AppHandle, id: String) -> Result<(), String> {
+    let token = secrets::read(secrets::SESSION)?.ok_or("Turn chat on first.")?;
+    let id = user_id(&id)?;
+    auth::api(&api_base(&app), &token, reqwest::Method::DELETE, &format!("/api/chat/room/{id}"), None).await.map(|_| ())
+}
+
+// ---- files ---------------------------------------------------------------------
+
+/// Pick a file and send it, end-to-end encrypted. None when cancelled.
+#[tauri::command]
+pub async fn chat_send_file(window: tauri::Window, state: State<'_, ChatState>, peer: String) -> Result<Option<km_store_sqlcipher::MessageRow>, String> {
+    let chat = current(&state)?;
+    let to = target(&peer)?;
+    let Some(path) = file_dialog(&window, None).await? else { return Ok(None) };
+    let meta = std::fs::metadata(&path).map_err(|e| format!("Could not read the file: {e}"))?;
+    if meta.len() > km_core::MAX_ATTACHMENT as u64 {
+        return Err("Files can be up to 25 MB.".into());
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Could not read the file: {e}"))?;
+    let row = chat.send_file(to, &gateway_http(), name, bytes).await.map_err(|e| e.to_string())?;
+    Ok(Some(chat.shown(row)))
+}
+
+/// Download a file from a message and save it where the person picks.
+#[tauri::command]
+pub async fn chat_file_save(window: tauri::Window, state: State<'_, ChatState>, msg: String) -> Result<Option<String>, String> {
+    let chat = current(&state)?;
+    let (file, bytes) = chat.fetch_file(&msg_id(&msg)?, &gateway_http()).await?;
+    let Some(path) = file_dialog(&window, Some(file.name.clone())).await? else { return Ok(None) };
+    tokio::fs::write(&path, bytes.as_slice()).await.map_err(|e| format!("Could not save it: {e}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// An image from a message, decrypted, as a data: URL to show inline.
+#[tauri::command]
+pub async fn chat_file_preview(state: State<'_, ChatState>, msg: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let chat = current(&state)?;
+    let (file, bytes) = chat.fetch_file(&msg_id(&msg)?, &gateway_http()).await?;
+    let mime = messaging::mime_of(&file.name);
+    if !mime.starts_with("image/") || bytes.len() > 10 * 1024 * 1024 {
+        return Err("No preview for this file.".into());
+    }
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes.as_slice())))
 }
 
 // ---- groups --------------------------------------------------------------------

@@ -18,7 +18,7 @@ use km_core::chat::{
 };
 use km_core::{new_message_id, CoreError, DeviceKeys, DeviceKind, SignedDevice, SignedPrekey, TrustedDevice, UserDevices};
 use km_proto::gateway::{self as gw, client_frame::Kind as C, server_frame::Kind as S, SendStatus};
-use km_proto::{content::Body, Content, Delete, Edit, Gif, GroupMeta, Invite, Reaction, Receipt, ReceiptKind, Text, Typing};
+use km_proto::{content::Body, Attachment, Call, CallKind, Content, Delete, Edit, Gif, GroupMeta, Invite, Reaction, Receipt, ReceiptKind, Text, Typing};
 use km_store_sqlcipher::{MessageRow, NewMessage, Status};
 use serde::{Deserialize, Serialize};
 
@@ -144,6 +144,74 @@ fn group_name_key(group: u64) -> String {
     format!("group-name-{group}")
 }
 
+/// A file as stored: where its ciphertext is and what opens it. The key is
+/// only ever in the encrypted local database and in the encrypted message.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBody {
+    pub id: String,
+    pub token: String,
+    pub key: String,
+    pub sha256: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+}
+
+impl FileBody {
+    fn to_proto(&self) -> Option<Attachment> {
+        Some(Attachment {
+            id: self.id.parse().ok()?,
+            download_token: self.token.clone(),
+            key: hex::decode(&self.key).ok()?,
+            sha256: hex::decode(&self.sha256).ok()?,
+            name: self.name.clone(),
+            mime: self.mime.clone(),
+            size: self.size,
+            width: self.width,
+            height: self.height,
+        })
+    }
+
+    fn from_proto(a: &Attachment) -> Self {
+        Self {
+            id: a.id.to_string(),
+            token: a.download_token.clone(),
+            key: hex::encode(&a.key),
+            sha256: hex::encode(&a.sha256),
+            name: a.name.clone(),
+            mime: a.mime.clone(),
+            size: a.size,
+            width: a.width,
+            height: a.height,
+        }
+    }
+
+    /// The same file, with what the shell may see (no key, no token).
+    pub fn public_json(&self) -> String {
+        serde_json::json!({ "name": self.name, "mime": self.mime, "size": self.size, "width": self.width, "height": self.height }).to_string()
+    }
+}
+
+/// A guess at the type from the file name, for previews and the save dialog.
+pub fn mime_of(name: &str) -> &'static str {
+    match name.rsplit('.').next().map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("txt" | "log") => "text/plain",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        Some("mp4") => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
 /// How long an invite stays joinable: Steam lobbies do not last.
 pub const INVITE_TTL_MS: u64 = 15 * 60 * 1000;
 
@@ -256,6 +324,12 @@ impl Chat {
     /// What the reader sees for a stored message: the supporter-only rules
     /// applied against the sender's current supporter status.
     pub fn shown(&self, mut row: MessageRow) -> MessageRow {
+        if row.kind == "file" {
+            if let Ok(f) = serde_json::from_str::<FileBody>(&row.body) {
+                row.body = f.public_json();
+            }
+            return row;
+        }
         // Invites are checked field by field when they arrive (invite_valid).
         if row.outgoing || row.deleted || row.kind == "invite" {
             return row;
@@ -530,6 +604,100 @@ impl Chat {
         self.send_new(target, content, "invite", &body, None).await
     }
 
+    /// Encrypt a file here, upload only the ciphertext to the gateway
+    /// (`http_base`: its https origin), then send the message that holds
+    /// the key.
+    pub async fn send_file(&self, target: Target, http_base: &str, name: String, bytes: Vec<u8>) -> Result<MessageRow, SendError> {
+        if bytes.len() > km_core::MAX_ATTACHMENT {
+            return Err(SendError::Invalid("Files can be up to 25 MB.".into()));
+        }
+        let client = self.client().ok_or(SendError::Offline)?;
+        let size = bytes.len() as u64;
+        let sealed = tokio::task::spawn_blocking(move || km_core::seal_attachment(&bytes))
+            .await
+            .map_err(|e| SendError::Failed(e.to_string()))?
+            .map_err(|e| SendError::Failed(e.to_string()))?;
+        let ticket = match client
+            .request(C::AttachmentTicket(gw::AttachmentTicket { size: sealed.ciphertext.len() as u64 }))
+            .await
+            .map_err(|e| SendError::Failed(e.message))?
+        {
+            S::AttachmentUpload(t) => t,
+            _ => return Err(SendError::Failed("Unexpected answer.".into())),
+        };
+        let url = format!("{http_base}/v1/attachments/{}?t={}&s={}", ticket.id, ticket.upload_token, sealed.ciphertext.len());
+        let res = reqwest::Client::new()
+            .put(url)
+            .body(sealed.ciphertext)
+            .send()
+            .await
+            .map_err(|e| SendError::Failed(format!("Could not upload the file: {e}")))?;
+        if !res.status().is_success() {
+            return Err(SendError::Failed(format!("The upload was refused ({}).", res.status())));
+        }
+        let name: String = name.chars().filter(|c| !c.is_control() && !matches!(c, '/' | '\\')).take(200).collect();
+        let file = FileBody {
+            id: ticket.id.to_string(),
+            token: ticket.download_token,
+            key: hex::encode(sealed.key.as_slice()),
+            sha256: hex::encode(sealed.sha256),
+            mime: mime_of(&name).into(),
+            name: if name.trim().is_empty() { "file".into() } else { name },
+            size,
+            width: 0,
+            height: 0,
+        };
+        let body = serde_json::to_string(&file).map_err(|e| SendError::Failed(e.to_string()))?;
+        let me = self.my_id().await;
+        let content = Content {
+            msg_id: new_message_id().to_vec(),
+            conversation_id: target.conversation(me),
+            sent_at_ms: now_ms(),
+            body: Some(Body::Attachment(file.to_proto().ok_or(SendError::Failed("Bad file.".into()))?)),
+        };
+        self.send_new(target, content, "file", &body, None).await
+    }
+
+    /// Download, check and decrypt a file from a message on this PC.
+    pub async fn fetch_file(&self, msg_id: &[u8], http_base: &str) -> Result<(FileBody, zeroize::Zeroizing<Vec<u8>>), String> {
+        let row = self.engine.lock().await.store.message(msg_id).ok().flatten().ok_or("No such message.")?;
+        if row.kind != "file" || row.deleted {
+            return Err("That message has no file.".into());
+        }
+        let file: FileBody = serde_json::from_str(&row.body).map_err(|_| "The file details are damaged.".to_string())?;
+        let url = format!("{http_base}/v1/attachments/{}?t={}", file.id, file.token);
+        let res = reqwest::Client::new().get(url).send().await.map_err(|e| format!("Could not download the file: {e}"))?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err("This file is no longer available (files are kept for 30 days).".into());
+        }
+        if !res.status().is_success() {
+            return Err(format!("The download was refused ({}).", res.status()));
+        }
+        let bytes = res.bytes().await.map_err(|e| format!("Could not download the file: {e}"))?;
+        let key = hex::decode(&file.key).map_err(|_| "The file details are damaged.".to_string())?;
+        let sha = hex::decode(&file.sha256).map_err(|_| "The file details are damaged.".to_string())?;
+        let plain = km_core::open_attachment(&key, &sha, &bytes).map_err(|_| "The file did not check out; it may have been changed.".to_string())?;
+        Ok((file, plain))
+    }
+
+    /// Voice call signalling to someone (WebRTC offer/answer/ICE, hang up).
+    /// Ephemeral: to their devices that are online right now, never stored.
+    pub async fn send_call(&self, peer: u64, call_id: Vec<u8>, kind: CallKind, payload: String) -> Result<(), SendError> {
+        if self.awaiting_answer(peer) {
+            return Err(SendError::Invalid("Accept their message request first.".into()));
+        }
+        let me = self.my_id().await;
+        let content = Content {
+            msg_id: new_message_id().to_vec(),
+            conversation_id: dm_conversation_id(me, peer),
+            sent_at_ms: now_ms(),
+            body: Some(Body::Call(Call { call_id, kind: kind as i32, payload })),
+        };
+        let supporter = self.me_supporter();
+        validate_outgoing(&content, supporter).map_err(|e| invalid(e, supporter))?;
+        self.deliver(&[peer], &content, true, None).await
+    }
+
     /// One of your own messages, if it may still be edited or deleted.
     async fn own_recent(&self, msg_id: &[u8]) -> Result<MessageRow, SendError> {
         let row = self.engine.lock().await.store.message(msg_id).ok().flatten();
@@ -666,6 +834,10 @@ impl Chat {
                     Ok(i) => Body::Invite(i.to_proto()),
                     Err(_) => continue,
                 },
+                "file" => match serde_json::from_str::<FileBody>(&row.body).ok().and_then(|f| f.to_proto()) {
+                    Some(a) => Body::Attachment(a),
+                    None => continue,
+                },
                 _ => Body::Text(Text {
                     text: row.body.clone(),
                     reply_to: row.reply_to.as_deref().and_then(|r| hex::decode(r).ok()).unwrap_or_default(),
@@ -746,7 +918,8 @@ impl Chat {
         };
         match content.body {
             Some(Body::Invite(ref i)) if !km_core::chat::invite_valid(i) => {}
-            Some(Body::Text(_)) | Some(Body::Gif(_)) | Some(Body::Invite(_)) => {
+            Some(Body::Attachment(ref a)) if !km_core::chat::attachment_valid(a) => {}
+            Some(Body::Text(_)) | Some(Body::Gif(_)) | Some(Body::Invite(_)) | Some(Body::Attachment(_)) => {
                 let (kind, body, reply) = match &content.body {
                     Some(Body::Text(t)) => ("text", t.text.clone(), (t.reply_to.len() == 16).then(|| t.reply_to.clone())),
                     Some(Body::Gif(g)) => (
@@ -763,6 +936,7 @@ impl Chat {
                         None,
                     ),
                     Some(Body::Invite(i)) => ("invite", serde_json::to_string(&InviteBody::from_proto(i)).unwrap_or_default(), None),
+                    Some(Body::Attachment(a)) => ("file", serde_json::to_string(&FileBody::from_proto(a)).unwrap_or_default(), None),
                     _ => unreachable!(),
                 };
                 let row = {
@@ -797,6 +971,10 @@ impl Chat {
                                 .map(|i| format!("Invites you to play {}", i.title))
                                 .unwrap_or_else(|_| "Sent a game invite".into()),
                             "gif" => "Sent a GIF".into(),
+                            "file" => serde_json::from_str::<serde_json::Value>(&shown.body)
+                                .ok()
+                                .and_then(|v| v["name"].as_str().map(|n| format!("Sent a file: {n}")))
+                                .unwrap_or_else(|| "Sent a file".into()),
                             _ => shown.body.chars().take(140).collect(),
                         });
                         let group_name = match target {
@@ -902,6 +1080,26 @@ impl Chat {
                 };
                 if let Some(u) = updated {
                     self.emit_row(false, u);
+                }
+            }
+            Some(Body::Call(c)) if !from_me => {
+                // Calls are one-to-one, from people who may talk to us.
+                if let (Target::Dm(_), true, false) = (target, km_core::chat::call_valid(&c), self.awaiting_answer(sender)) {
+                    let kind = match CallKind::try_from(c.kind) {
+                        Ok(CallKind::Offer) => "offer",
+                        Ok(CallKind::Answer) => "answer",
+                        Ok(CallKind::Ice) => "ice",
+                        Ok(CallKind::Hangup) => "hangup",
+                        Ok(CallKind::Decline) => "decline",
+                        Ok(CallKind::Busy) => "busy",
+                        _ => return,
+                    };
+                    (self.emit)(ChatEvent::Call {
+                        user_id: sender.to_string(),
+                        call_id: hex::encode(&c.call_id),
+                        kind: kind.into(),
+                        payload: c.payload,
+                    });
                 }
             }
             Some(Body::GroupMeta(m)) => {

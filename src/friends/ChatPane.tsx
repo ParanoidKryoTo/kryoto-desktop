@@ -6,6 +6,9 @@ import {
   Clock,
   Gamepad2,
   ImagePlay,
+  Paperclip,
+  Phone,
+  Download,
   Flag,
   Lock,
   Pencil,
@@ -39,6 +42,11 @@ import {
   chatVerifyMark,
   parseGif,
   parseInvite,
+  parseFile,
+  chatSendFile,
+  chatFileSave,
+  chatFilePreview,
+  type FileInfo,
   QUICK_REACTIONS,
   textLimit,
   type ChatMessage,
@@ -51,6 +59,7 @@ import {
 } from '@/lib/chat'
 import { InvitePicker, type InviteGame } from './InvitePicker'
 import { ReportDialog } from './ReportDialog'
+import { startCall } from '@/lib/calls'
 import { Button, Caption, Check as Toggle, IconButton, Modal, Segmented } from '@/ui'
 import { cn } from '@/lib/utils'
 import { artSrc } from '@/lib/art'
@@ -105,6 +114,52 @@ function GifView({ gif, auto }: { gif: Gif; auto: boolean }) {
     )
   }
   return <img src={gif.url} alt={gif.title || 'GIF'} width={w} height={h} className="kryo-radius object-cover" loading="lazy" />
+}
+
+function size(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** A file in a message: images show inline (decrypted here), anything can be saved. */
+function FileCard({ msgId, file }: { msgId: string; file: FileInfo }) {
+  const image = file.mime.startsWith('image/') && file.size <= 10 * 1024 * 1024
+  const [src, setSrc] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  useEffect(() => {
+    if (!image) return
+    let alive = true
+    void chatFilePreview(msgId)
+      .then((s) => alive && setSrc(s))
+      .catch((e) => alive && setError(errorText(e)))
+    return () => {
+      alive = false
+    }
+  }, [msgId, image])
+  return (
+    <span className="grid gap-2">
+      {src ? <img src={src} alt={file.name} className="kryo-radius max-h-72 max-w-full object-contain" /> : null}
+      <span className="flex items-center gap-3">
+        <span className="grid min-w-0">
+          <b className="truncate text-xs">{file.name}</b>
+          <span className="text-[10px] text-muted-foreground">{size(file.size)}{saved ? ' - saved' : ''}</span>
+        </span>
+        <Button
+          size="sm"
+          onClick={() =>
+            void chatFileSave(msgId)
+              .then((w) => w && setSaved(true))
+              .catch((e) => setError(errorText(e)))
+          }
+        >
+          <Download className="size-3" aria-hidden /> Save
+        </Button>
+      </span>
+      {error ? <span className="text-[11px] text-destructive">{error}</span> : null}
+    </span>
+  )
 }
 
 function InviteCard({
@@ -166,6 +221,7 @@ export function ChatPane({
   group,
   nameOf = () => 'Someone',
   onMembers,
+  canCall = false,
 }: {
   peer: { id: string; name: string; supporter: boolean }
   myId: string
@@ -185,6 +241,8 @@ export function ChatPane({
   /** Names of the people writing in a group. */
   nameOf?: (userId: string) => string
   onMembers?: () => void
+  /** Voice calls are rolled out to this account. */
+  canCall?: boolean
 }) {
   const conversationId = useMemo(() => (group ? groupConversationId(group.id) : dmConversationId(myId, peer.id)), [group, myId, peer.id])
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -359,6 +417,11 @@ export function ChatPane({
             </IconButton>
           ) : (
             <>
+              {canCall && !request ? (
+                <IconButton label={`Call ${peer.name}`} onClick={() => void startCall(peer.id).catch((e) => setError(errorText(e)))}>
+                  <Phone className="size-4" />
+                </IconButton>
+              ) : null}
               <IconButton label={verify?.verified ? `${peer.name} is verified` : `Verify ${peer.name}`} onClick={() => setVerifyOpen(true)}>
                 {keyChanged ? (
                   <ShieldAlert className="size-4 text-destructive" />
@@ -389,6 +452,7 @@ export function ChatPane({
           const quoted = m.replyTo ? byId.get(m.replyTo) : null
           const gif = m.kind === 'gif' && !m.deleted ? parseGif(m.body) : null
           const invite = m.kind === 'invite' && !m.deleted ? parseInvite(m.body) : null
+          const file = m.kind === 'file' && !m.deleted ? parseFile(m.body) : null
           const canChange = m.outgoing && !m.deleted && Date.now() - m.sentAt < EDIT_WINDOW_MS
           return (
             <div key={m.msgId} className={cn('group flex', m.outgoing ? 'justify-end' : 'justify-start')}>
@@ -396,7 +460,7 @@ export function ChatPane({
                 {group && !m.outgoing ? <span className="text-[10px] font-bold text-muted-foreground">{nameOf(m.senderUser)}</span> : null}
                 {quoted ? (
                   <span className="truncate border-l-2 border-border pl-2 text-[11px] text-muted-foreground">
-                    {quoted.deleted ? 'Message deleted' : quoted.kind === 'gif' ? 'GIF' : quoted.kind === 'invite' ? `Game invite: ${parseInvite(quoted.body)?.title ?? ''}` : quoted.body.slice(0, 80)}
+                    {quoted.deleted ? 'Message deleted' : quoted.kind === 'gif' ? 'GIF' : quoted.kind === 'file' ? `File: ${parseFile(quoted.body)?.name ?? ''}` : quoted.kind === 'invite' ? `Game invite: ${parseInvite(quoted.body)?.title ?? ''}` : quoted.body.slice(0, 80)}
                   </span>
                 ) : null}
                 <div
@@ -410,6 +474,8 @@ export function ChatPane({
                     'Message deleted'
                   ) : gif ? (
                     <GifView gif={gif} auto={settings?.gifsAuto ?? true} />
+                  ) : file ? (
+                    <FileCard msgId={m.msgId} file={file} />
                   ) : invite ? (
                     <InviteCard invite={invite} outgoing={m.outgoing} name={peer.name} cover={games.find((g) => g.slug === invite.slug)?.cover ?? null} onJoin={onJoinInvite} />
                   ) : (
@@ -600,6 +666,16 @@ export function ChatPane({
             aria-label={`Message ${peer.name}`}
             className="kryo-radius max-h-40 min-h-9 grow resize-none border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-foreground"
           />
+          <IconButton
+            label="Send a file (up to 25 MB)"
+            onClick={() =>
+              void chatSendFile(peer.id)
+                .then((m) => m && setMessages((list) => (list.some((x) => x.msgId === m.msgId) ? list : [...list, m])))
+                .catch((e) => setError(errorText(e)))
+            }
+          >
+            <Paperclip className="size-4" />
+          </IconButton>
           <IconButton label="Invite to a game" onClick={() => setInviting(true)}>
             <Gamepad2 className="size-4" />
           </IconButton>

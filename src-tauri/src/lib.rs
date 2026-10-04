@@ -66,6 +66,12 @@ struct Account {
     /// Group chats are rolled out to this account (flag `chat_groups`).
     #[serde(default)]
     groups: bool,
+    /// The public room is rolled out to this account (flag `chat_room`).
+    #[serde(default)]
+    room: bool,
+    /// Voice calls are rolled out to this account (flag `voice`).
+    #[serde(default)]
+    voice: bool,
 }
 
 /// State reported by the page-side script.
@@ -395,6 +401,8 @@ const BROWSER_STATE_SCRIPT: &str = r#"
           chat: !!(u.features && u.features.chat),
           friends: !!(u.features && u.features.friends),
           groups: !!(u.features && u.features.chat_groups),
+          room: !!(u.features && u.features.chat_room),
+          voice: !!(u.features && u.features.voice),
           appearance: {
             palette: u.appearancePalette || null,
             radius: u.appearanceRadius || null,
@@ -1110,6 +1118,14 @@ pub fn run() {
             chat::chat_send_invite,
             chat::chat_report,
             chat::chat_export_history,
+            chat::chat_send_file,
+            chat::room_list,
+            chat::chat_call_signal,
+            chat::chat_ice_servers,
+            chat::room_post,
+            chat::room_delete,
+            chat::chat_file_save,
+            chat::chat_file_preview,
             chat::chat_groups,
             chat::chat_people,
             chat::chat_group_create,

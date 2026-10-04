@@ -290,6 +290,19 @@ const HANDLERS: Record<string, (a: Record<string, unknown>) => unknown> = {
   online_lobby: () => ({ lobby: '109775241075364289', hostSteamId: '76561198000000000' }),
   steam_join_lobby: () => null,
   chat_report: () => null,
+  chat_send_file: () => null,
+  room_list: () => ({
+    canModerate: false,
+    messages: [{ id: '1', body: 'anyone up for Lethal Company tonight?', createdAt: new Date().toISOString(), user: { id: '2', username: 'bo', displayName: 'Bo', avatarUrl: null, supporter: true } }],
+  }),
+  room_post: () => ({}),
+  room_delete: () => null,
+  chat_call_signal: () => null,
+  chat_ice_servers: () => ({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] }),
+  chat_file_save: () => null,
+  chat_file_preview: () => {
+    throw new Error('No preview in the browser preview.')
+  },
   chat_groups: () => previewGroups,
   chat_group_create: (a) => {
     const g = { id: String(1000 + previewGroups.length), name: String(a.name), members: [{ userId: '1', role: 'owner' }, ...(a.members as string[]).map((userId) => ({ userId, role: 'member' }))], myRole: 'owner' }

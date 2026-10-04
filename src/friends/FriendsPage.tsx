@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BellOff, MessageSquare, MessageSquarePlus, Plus, Search, ShieldCheck, Star, UserPlus, Users, Gamepad2, X } from 'lucide-react'
+import { BellOff, Globe, MessageSquare, MessageSquarePlus, Plus, Search, ShieldCheck, Star, UserPlus, Users, Gamepad2, X } from 'lucide-react'
 import { artSrc } from '@/lib/art'
 import { Button, Caption, IconButton, inputCls, Label } from '@/ui'
 import type { Account } from '@/hooks/useAccount'
@@ -23,6 +23,7 @@ import {
   type Invite,
 } from '@/lib/chat'
 import { GroupCreateDialog, GroupMembersDialog } from './GroupDialogs'
+import { RoomPane } from './RoomPane'
 import type { InviteGame } from './InvitePicker'
 import { call, errorText, on } from '@/lib/bridge'
 
@@ -358,6 +359,22 @@ export function FriendsPage({
             {strangers.chats.length > 0 ? (
               <PeopleGroup title="Other chats" list={strangers.chats} unread={unread} selected={selected} onOpen={openFriend} />
             ) : null}
+            {account.room && chatOn ? (
+              <button
+                type="button"
+                onClick={() => setSelected('room')}
+                aria-current={selected === 'room' ? 'true' : undefined}
+                className={`kryo-radius flex items-center gap-2.5 px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-secondary${selected === 'room' ? ' bg-secondary' : ''}`}
+              >
+                <span className="kryo-pill grid size-7 shrink-0 place-items-center bg-secondary">
+                  <Globe className="size-3.5 text-muted-foreground" aria-hidden />
+                </span>
+                <span className="grid min-w-0">
+                  <span>Public room</span>
+                  <span className="text-[10px] text-muted-foreground">Everyone, not encrypted</span>
+                </span>
+              </button>
+            ) : null}
             {groupsOn && chatOn ? (
               <div className="grid gap-1">
                 <Caption className="mb-1 flex items-center justify-between">
@@ -444,7 +461,9 @@ export function FriendsPage({
         })()
       ) : null}
 
-      {openGroup && chatOn && myIdRef.current ? (
+      {selected === 'room' && chatOn && account.room ? (
+        <RoomPane myUsername={account.username} onProfile={(u) => onWeb(`/user/${encodeURIComponent(u)}`)} />
+      ) : openGroup && chatOn && myIdRef.current ? (
         <ChatPane
           key={selected ?? ''}
           peer={{ id: groupTarget(openGroup.id), name: openGroup.name, supporter: false }}
@@ -466,6 +485,7 @@ export function FriendsPage({
           onProfile={() => onWeb(`/user/${encodeURIComponent(peer.username)}`)}
           request={requestOf(peer.id)}
           onRespond={(accept) => respond(peer.id, accept)}
+          canCall={!!account.voice}
           games={games}
           onJoinInvite={onJoinInvite}
         />

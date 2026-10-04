@@ -16,6 +16,10 @@ export type Account = {
   friends?: boolean
   /** Group chats are rolled out to this account (kryo.to feature flag). */
   groups?: boolean
+  /** The public room is rolled out to this account (kryo.to feature flag). */
+  room?: boolean
+  /** Voice calls are rolled out to this account (kryo.to feature flag). */
+  voice?: boolean
   /** Using the client without an account (see App). */
   guest?: boolean
 }
@@ -56,7 +60,7 @@ export function useAccount(): Account | null | undefined {
       ? isOnline()
         ? undefined
         : remembered()
-      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, chat: true, friends: true, groups: true },
+      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, chat: true, friends: true, groups: true, room: true },
   )
   useEffect(() => {
     let stop: (() => void) | undefined

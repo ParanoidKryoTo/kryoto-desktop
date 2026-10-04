@@ -17,6 +17,8 @@ import { KryoMorph } from '@/ui/ascii/KryoMorph'
 import { EmptyState } from '@/ui/EmptyState'
 import { SHELF } from '@/ui/ascii/scenes'
 import { FriendsPage } from '@/friends/FriendsPage'
+import { CallOverlay } from '@/friends/CallOverlay'
+import { friendName, useFriends } from '@/hooks/useFriends'
 import { CommunityPage } from '@/community/CommunityPage'
 import { TitleBar } from '@/shell/TitleBar'
 import { NavBar, type NavTabSpec, type TopTab } from '@/shell/NavBar'
@@ -753,6 +755,12 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
   }
 
   const overlayGame = overlay && 'id' in overlay ? gameById(overlay.id) : null
+  // Voice calls ring wherever you are in the app.
+  const friendsState = useFriends()
+  const callerName = (id: string) => {
+    const f = friendsState?.friends.find((x) => x.id === id) ?? friendsState?.messageRequests.accepted.find((x) => x.id === id)
+    return f ? friendName(f) : 'Someone'
+  }
 
   return (
     <div className="flex h-full flex-col bg-background">
@@ -898,6 +906,7 @@ export function Shell({ startPage, account, browser }: { startPage: 'store' | 'l
           </div>
         </Modal>
       ) : null}
+      {account.voice ? <CallOverlay nameOf={callerName} /> : null}
     </div>
   )
 }
