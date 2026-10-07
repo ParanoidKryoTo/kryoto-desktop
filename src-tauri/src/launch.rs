@@ -298,9 +298,26 @@ pub fn plan(input: &PlanInput) -> Result<LaunchPlan, String> {
         } else if kind == "proton" {
             chain.push("run".into());
             set_default(&mut env, "STEAM_COMPAT_DATA_PATH", &input.prefix_dir.to_string_lossy());
+            
+            // FIX: Dynamically resolve the correct Steam client installation path.
+            // Required because Arch Linux / CachyOS use ~/.local/share/Steam instead of ~/.steam/steam
+            // which causes "bare" Proton to fail silently.
             let client = std::env::var("HOME")
-                .map(|h| format!("{h}/.steam/steam"))
+                .map(|h| {
+                    let arch_path = format!("{h}/.local/share/Steam");
+                    let flatpak_path = format!("{h}/.var/app/com.valvesoftware.Steam/.local/share/Steam");
+                    let ubuntu_path = format!("{h}/.steam/steam");
+
+                    if Path::new(&arch_path).exists() {
+                        arch_path
+                    } else if Path::new(&flatpak_path).exists() {
+                        flatpak_path
+                    } else {
+                        ubuntu_path // Fallback to default Ubuntu path
+                    }
+                })
                 .unwrap_or_else(|_| "/tmp".into());
+                
             set_default(&mut env, "STEAM_COMPAT_CLIENT_INSTALL_PATH", &client);
         } else {
             set_default(&mut env, "WINEPREFIX", &input.prefix_dir.to_string_lossy());
