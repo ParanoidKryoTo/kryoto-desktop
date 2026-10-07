@@ -656,16 +656,26 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
 /// * `WEBKIT_DISABLE_DMABUF_RENDERER=1`: WebKitGTK's DMA-BUF renderer draws
 ///   blank, torn or offset pages on many drivers (NVIDIA in particular).
 #[cfg(target_os = "linux")]
+fn is_nvidia() -> bool {
+    // Checks if kernel module "linux" is loaded
+    std::fs::read_to_string("/proc/modules")
+        .map(|m| m.lines().any(|line| line.starts_with("nvidia ")))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
 fn linux_env() {
     let unset = |key: &str| std::env::var_os(key).is_none_or(|v| v.is_empty());
+    
     if unset("GDK_BACKEND") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
         std::env::set_var("GDK_BACKEND", "x11");
     }
-    if unset("WEBKIT_DISABLE_DMABUF_RENDERER") {
+
+    // Turns off DMABUF ONLY for nvidia cards
+    if unset("WEBKIT_DISABLE_DMABUF_RENDERER") && is_nvidia() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 }
-
 /// A mouse back/forward button pressed in the Store: the shell steps its one
 /// history, as its arrows do.
 #[tauri::command]
