@@ -67,6 +67,9 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>, id: &str, settings: &crate:
         .and_then(|slug| library::load(app).ok()?.into_iter().find(|g| g.slug.as_deref() == Some(slug.as_str())))
         .ok_or_else(|| format!("{label} is an add-on. Install {} first, then download it again.", item.meta.title))?;
     downloads::set_status_pub(app, id, Status::Extracting, None);
+    // 7-Zip on hand, as for a game: faster, and it reads every filter.
+    #[cfg(windows)]
+    downloads::ensure_7zr(app).await;
 
     let root = game_root(app, &game);
     let staging = root.with_file_name(format!(".{}.addon", downloads::safe_name(&game.title)));
