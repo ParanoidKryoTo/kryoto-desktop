@@ -10,6 +10,11 @@ export type Account = {
   appearance?: AccountAppearance | null
   /** A kryo.to supporter, or someone who bought "no ads": never asked to donate. */
   supporter?: boolean
+  /**
+   * Their Kryos, the coin of kryo.to's Hatchery, when they have a wallet.
+   * Shown beside the account; a click opens the Hatchery (18+) in the Store.
+   */
+  kryos?: number | null
   /** Using the client without an account (see App). */
   guest?: boolean
 }
@@ -50,7 +55,7 @@ export function useAccount(): Account | null | undefined {
       ? isOnline()
         ? undefined
         : remembered()
-      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null },
+      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, kryos: 12480 },
   )
   useEffect(() => {
     let stop: (() => void) | undefined
