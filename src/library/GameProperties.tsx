@@ -20,8 +20,9 @@ import {
 } from '@/lib/library'
 import { cn } from '@/lib/utils'
 import { VersionsList, type GetOurs } from '@/library/Versions'
+import { GameLogs } from '@/library/GameLogs'
 
-type Tab = 'general' | 'compat' | 'files' | 'versions' | 'kryoto'
+type Tab = 'general' | 'compat' | 'files' | 'versions' | 'kryoto' | 'logs'
 
 const TABS = [
   ['general', 'General'],
@@ -29,6 +30,7 @@ const TABS = [
   ['files', 'Installed files'],
   ['versions', 'Builds'],
   ['kryoto', 'kryo.to'],
+  ['logs', 'Logs'],
 ] as const as readonly (readonly [Tab, string])[]
 
 /**
@@ -40,6 +42,7 @@ const TABS = [
  *   Builds           Steam's Betas: every build on kryo.to, from any of its
  *                    sources, and keeping the installed one over updates
  *   kryo.to          the page it is linked to, refreshed from there
+ *   Logs             every launch's log, to read, copy or send to staff
  * Edits a draft; Save writes it, closing is always cancel.
  */
 export function GameProperties({
@@ -368,6 +371,7 @@ export function GameProperties({
             ) : null}
           </>
         ) : null}
+        {tab === 'logs' ? <GameLogs id={game.id} /> : null}
       </Panes>
     </Modal>
   )

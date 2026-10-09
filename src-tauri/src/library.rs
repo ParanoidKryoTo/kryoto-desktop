@@ -303,7 +303,8 @@ pub async fn library_remove(app: AppHandle, id: String, delete_files: bool) -> R
     Ok(deleted)
 }
 
-fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<usize>) -> Result<LaunchPlan, String> {
+/// The plan, and the compatibility tool it uses (for the game's log).
+fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<usize>) -> Result<(LaunchPlan, Option<PathBuf>), String> {
     let entry = match entry {
         Some(i) => Some(game.entries.get(i).ok_or("That launch entry no longer exists.")?),
         None => None,
@@ -336,8 +337,9 @@ fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<us
         }
     }
     let tool = own.or(fallback).or(detected);
+    let tool_path = tool.as_deref().map(PathBuf::from);
     let tool = tool.as_deref().map(Path::new);
-    launch::plan(&launch::PlanInput {
+    let plan = launch::plan(&launch::PlanInput {
         install_dir: Path::new(&game.install_dir),
         executable: &game.executable,
         default_args: &game.default_args,
@@ -351,13 +353,14 @@ fn plan_for<R: Runtime>(app: &AppHandle<R>, game: &LibraryGame, entry: Option<us
         umu: umu.as_deref(),
         wrappers,
         env,
-    })
+    })?;
+    Ok((plan, tool_path))
 }
 
 /// The exact line Play would run, for the Properties window.
 #[tauri::command(async)]
 pub fn game_launch_preview(app: AppHandle, game: LibraryGame, entry: Option<usize>) -> Result<String, String> {
-    Ok(plan_for(&app, &game, entry)?.display())
+    Ok(plan_for(&app, &game, entry)?.0.display())
 }
 
 #[tauri::command]
@@ -379,7 +382,7 @@ pub fn game_launch(
         return Err("It is already running.".into());
     }
     let game = load(&app)?.into_iter().find(|g| g.id == id).ok_or("That game is no longer in the library.")?;
-    let mut plan = plan_for(&app, &game, entry)?;
+    let (mut plan, tool) = plan_for(&app, &game, entry)?;
     // From a game invite: start straight into the host's Steam lobby.
     if let Some(arg) = join_lobby.as_deref().and_then(crate::lobbies::connect_arg) {
         plan.game_args = format!("{} {arg}", plan.game_args).trim().to_string();
@@ -443,17 +446,42 @@ pub fn game_launch(
         // Its own process group, so Stop takes Wine and everything it started.
         cmd.process_group(0);
     }
+    // Everything the game (and Wine/Proton) prints goes into its log (game_logs.rs).
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let log = crate::game_logs::begin(&app, &game, &plan, tool.as_deref());
     let mut child = match cmd.spawn() {
-        Ok(child) => child,
+        Ok(mut child) => {
+            if let Some(log) = &log {
+                log.capture(&mut child);
+            }
+            child
+        }
         // ERROR_ELEVATION_REQUIRED: the exe's manifest asks for administrator
         // rights, which a plain start cannot give. Ask Windows to elevate it
         // (the UAC prompt), through PowerShell so there is still a process to
         // wait on for "Playing" and the playtime.
         #[cfg(windows)]
-        Err(e) if e.raw_os_error() == Some(740) => elevated(&plan)
-            .spawn()
-            .map_err(|e| format!("Could not start {} as administrator: {e}", plan.program.display()))?,
-        Err(e) => return Err(format!("Could not start {}: {e}", plan.program.display())),
+        Err(e) if e.raw_os_error() == Some(740) => {
+            if let Some(log) = &log {
+                log.note("The game asks for administrator rights: started through Windows' prompt. Its output is not in this log.");
+            }
+            elevated(&plan).spawn().map_err(|e| {
+                let msg = format!("Could not start {} as administrator: {e}", plan.program.display());
+                if let Some(log) = &log {
+                    log.note(&msg);
+                    log.finish(None, 0, None);
+                }
+                msg
+            })?
+        }
+        Err(e) => {
+            let msg = format!("Could not start {}: {e}", plan.program.display());
+            if let Some(log) = &log {
+                log.note(&msg);
+                log.finish(None, 0, None);
+            }
+            return Err(msg);
+        }
     };
     let pid = child.id();
     running.0.lock().map_err(|_| "state lock poisoned")?.insert(id.clone(), pid);
@@ -475,6 +503,7 @@ pub fn game_launch(
     std::thread::spawn(move || {
         let status = child.wait().ok();
         let mut code = status.and_then(|s| s.code());
+        let mut followed = None;
         // A quick exit is often a hand-over (a launcher, a game restarting
         // itself), not a crash: follow the process now running from the game's
         // folder, so Stop, "Playing" and the playtime all carry on with it.
@@ -486,11 +515,15 @@ pub fn game_launch(
                     }
                 }
                 crate::logging::info("library", &format!("{id}: followed the game to process {next}"));
+                followed = Some(next);
                 crate::handoff::wait_gone(next);
                 code = None;
             }
         }
         let seconds = now().saturating_sub(started);
+        if let Some(log) = &log {
+            log.finish(code, seconds, followed);
+        }
         if let Some(state) = app.try_state::<Running>() {
             if let Ok(mut m) = state.0.lock() {
                 m.remove(&id);

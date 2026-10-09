@@ -3,6 +3,7 @@ mod art;
 mod chat;
 mod compat;
 mod display_env;
+mod game_logs;
 mod downloads;
 mod handoff;
 mod launch;
@@ -1115,6 +1116,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             links::take_pending_link,
             display_env::display_rendered,
+            game_logs::game_logs,
+            game_logs::game_log_read,
+            game_logs::game_logs_folder,
             display_env::display_state,
             display_env::display_set_mode,
             chat::chat_status,

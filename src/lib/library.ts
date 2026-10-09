@@ -197,6 +197,15 @@ export const BLANK_GAME: LibraryGame = {
   nsfw: false,
 }
 
+/** One launch's log (src-tauri/src/game_logs.rs). */
+export type GameLogInfo = { name: string; size: number; modified: number }
+
+export const gameLogs = {
+  list: (id: string) => call<GameLogInfo[]>('game_logs', { id }),
+  read: (id: string, name: string) => call<string>('game_log_read', { id, name }),
+  folder: (id: string) => call<string>('game_logs_folder', { id }),
+}
+
 export const library = {
   list: () => call<LibraryGame[]>('library_list'),
   add: (exePath: string, game: Partial<LibraryGame>) =>
