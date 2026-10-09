@@ -471,7 +471,10 @@ const BROWSER_STATE_SCRIPT: &str = r#"
         expectDownload: (slug, title) => invoke('store_expect_download', {
           slug: String(slug || ''),
           title: title ? String(title) : null
-        })
+        }),
+        // The download check, finished in the system browser when this web
+        // view cannot finish it (kryo.to's game-downloads.tsx).
+        openInBrowser: (path) => invoke('store_open_in_browser', { path: String(path || '') })
       })
     });
   } catch (_) {}
@@ -741,6 +744,32 @@ fn store_expect_download(
     let mut pending = state.0.lock().map_err(|_| "busy".to_string())?;
     *pending = Some(ExpectedDownload { slug, title, at: std::time::Instant::now() });
     Ok(())
+}
+
+/// kryo.to asks to finish its download check in the system browser
+/// (`window.kryotoDesktop.openInBrowser`): some web views, WebKitGTK on Linux
+/// above all, cannot finish Cloudflare's check. Only a kryo.to page in the
+/// Store may ask, and only for the check's own page.
+#[tauri::command]
+fn store_open_in_browser(app: tauri::AppHandle, webview: tauri::Webview, path: String) -> Result<(), String> {
+    if webview.label() != STORE {
+        return Err("Only the Store opens its checks.".into());
+    }
+    let page = webview.url().map_err(|e| e.to_string())?;
+    if !is_kryoto(&page, &app) {
+        return Err("Only kryo.to opens its checks.".into());
+    }
+    if !is_check_path(&path) {
+        return Err("Not a download check.".into());
+    }
+    let endpoint = settings::catalog_endpoint(&settings::load(&app));
+    open_external_url(&format!("{}{path}", endpoint.trim_end_matches('/')))
+}
+
+/// `/download-check/<nonce>`, and nothing else: the nonce is base64url.
+fn is_check_path(path: &str) -> bool {
+    path.strip_prefix("/download-check/")
+        .is_some_and(|n| (16..=64).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
 }
 
 /// Kryoto path shortcut (menus, tabs). Path-only, same origin.
@@ -1150,6 +1179,7 @@ pub fn run() {
             report_catalog_state,
             store_nav_button,
             store_expect_download,
+            store_open_in_browser,
             catalog_url,
             control_catalog,
             open_external,
