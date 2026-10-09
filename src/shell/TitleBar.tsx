@@ -3,6 +3,7 @@ import { artSrc } from '@/lib/art'
 import { Matrix, MenuButton, MenuList, type MenuEntry } from '@/ui'
 import { KryoMark } from '@/ui/ascii/KryoMark'
 import { DevEndpointNotice } from '@/ui/DevEndpointNotice'
+import { KryosCoin, compactKryos } from '@/ui/KryosCoin'
 import { closeWindow, isTauri, minimizeWindow, toggleFullscreen, toggleMaximize, useWindowState } from '@/lib/window'
 import { openInbox } from '@/lib/popup'
 import { cn } from '@/lib/utils'
@@ -29,6 +30,7 @@ export function TitleBar({
   onOpenNotification,
   onMarkRead,
   onAllNotifications,
+  onKryos,
 }: {
   /** No connection: a quiet pill says so, and what needs kryo.to waits. */
   offline?: boolean
@@ -41,6 +43,8 @@ export function TitleBar({
   onOpenNotification: (url: string | null) => void
   onMarkRead: () => void
   onAllNotifications: () => void
+  /** The coin beside the account: opens the Hatchery (18+) in the Store. */
+  onKryos: () => void
 }) {
   const { fullscreen } = useWindowState()
 
@@ -122,6 +126,21 @@ export function TitleBar({
             )}
           />
         )}
+
+        {/* Your Kryos, as on kryo.to: the coin and the amount, and a way into
+            the Hatchery, which opens behind its own 18+ check. Nothing else. */}
+        {!account.guest && typeof account.kryos === 'number' ? (
+          <button
+            type="button"
+            onClick={onKryos}
+            title={`${account.kryos.toLocaleString('en-GB')} Kryos · the Hatchery, 18+`}
+            aria-label={`You have ${account.kryos.toLocaleString('en-GB')} Kryos. Open the Hatchery, 18+`}
+            className="kryo-pill flex h-7 items-center gap-1.5 border border-border px-2.5 text-[11px] tabular-nums text-foreground transition-colors hover:border-foreground"
+          >
+            <KryosCoin size={14} className="shrink-0" />
+            {compactKryos(account.kryos)}
+          </button>
+        ) : null}
 
         <MenuButton
           native="account"

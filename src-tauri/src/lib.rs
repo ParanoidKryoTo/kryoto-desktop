@@ -55,6 +55,9 @@ struct Account {
     /// A supporter (or bought "no ads"): the client does not ask them to donate.
     #[serde(default)]
     supporter: bool,
+    /// Their Kryos balance (kryo.to's Hatchery coin), when they have a wallet.
+    #[serde(default)]
+    kryos: Option<i64>,
 }
 
 /// State reported by the page-side script.
@@ -361,7 +364,18 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   try { new MutationObserver(reportTitle).observe(document.querySelector('title') || document.head, { childList: true, subtree: true, characterData: true }); } catch (_) {}
 
   let me;
+  let kryos = null;
+  let account = null;
   let savedAt = 0;
+  // The Hatchery moves the balance as it is played (its context sends this
+  // event); pass it on so the coin beside the account keeps up.
+  addEventListener('kryo:kryos', (e) => {
+    const n = e && typeof e.detail === 'number' ? e.detail : null;
+    if (!account || n === null || n === kryos) return;
+    kryos = n;
+    account = Object.assign({}, account, { kryos: n });
+    send({ account });
+  });
   const json = (path) => fetch(path, { credentials: 'include' }).then((r) => r.json());
   const who = (full) => {
     if (!KRYO) return;
@@ -370,13 +384,16 @@ const BROWSER_STATE_SCRIPT: &str = r#"
       .then((j) => {
         const u = j && j.user;
         const id = u ? u.username : null;
-        const changed = id !== me;
+        const coins = u && u.kryos && typeof u.kryos.balance === 'number' ? u.kryos.balance : null;
+        const changed = id !== me || coins !== kryos;
         me = id;
-        if (changed || full) send({ account: u ? {
+        kryos = coins;
+        if (changed || full) send({ account: account = u ? {
           username: u.username,
           displayName: u.displayName || null,
           avatarUrl: u.avatarUrl || null,
           supporter: !!(u.isSupporter || (Array.isArray(u.perks) && u.perks.indexOf('ad_free') >= 0)),
+          kryos: coins,
           appearance: {
             palette: u.appearancePalette || null,
             radius: u.appearanceRadius || null,
