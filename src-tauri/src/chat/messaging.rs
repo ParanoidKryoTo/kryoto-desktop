@@ -1004,12 +1004,10 @@ impl Chat {
                     }
                 }
             }
-            Some(Body::Receipt(r)) if from_me => {
+            Some(Body::Receipt(r)) if from_me && ReceiptKind::try_from(r.kind) == Ok(ReceiptKind::Read) => {
                 // Our other device read this conversation: it is read here too.
-                if ReceiptKind::try_from(r.kind) == Ok(ReceiptKind::Read) {
-                    let _ = self.engine.lock().await.store.mark_read(&content.conversation_id, now_ms());
-                    (self.emit)(ChatEvent::ReadElsewhere { conversation_id: hex::encode(&content.conversation_id) });
-                }
+                let _ = self.engine.lock().await.store.mark_read(&content.conversation_id, now_ms());
+                (self.emit)(ChatEvent::ReadElsewhere { conversation_id: hex::encode(&content.conversation_id) });
             }
             Some(Body::Receipt(r)) if !from_me => {
                 let status = match ReceiptKind::try_from(r.kind).unwrap_or(ReceiptKind::Unspecified) {
@@ -1034,14 +1032,12 @@ impl Chat {
                     }
                 }
             }
-            Some(Body::Typing(t)) if !from_me => {
-                if self.settings().await.typing {
-                    (self.emit)(ChatEvent::Typing {
-                        conversation_id: hex::encode(&content.conversation_id),
-                        user_id: sender.to_string(),
-                        active: t.active,
-                    });
-                }
+            Some(Body::Typing(t)) if !from_me && self.settings().await.typing => {
+                (self.emit)(ChatEvent::Typing {
+                    conversation_id: hex::encode(&content.conversation_id),
+                    user_id: sender.to_string(),
+                    active: t.active,
+                });
             }
             Some(Body::Edit(e)) => {
                 let updated = {
