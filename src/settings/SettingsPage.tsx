@@ -3,7 +3,7 @@ import { artSrc } from '@/lib/art'
 import { Bell, Code2, Download, HardDrive, Heart, LogOut, Palette, ScrollText, Shield, SlidersHorizontal, User, Wrench } from 'lucide-react'
 import { AsciiBar, Button, Caption, Check, Section, Segmented, inputCls } from '@/ui'
 import { errorText } from '@/lib/bridge'
-import { PLAYER_NAME_MAX, settingsApi, useSettings, type Settings } from '@/lib/settings'
+import { displayApi, PLAYER_NAME_MAX, settingsApi, useSettings, type DisplayMode, type DisplayState, type Settings } from '@/lib/settings'
 import { isWindowsHost } from '@/lib/library'
 import { browserNavigate, isTauri, mountStore, placeMainStore, STORE_HOME } from '@/lib/window'
 import type { Account } from '@/hooks/useAccount'
@@ -294,6 +294,7 @@ function DesktopPane({ section }: { section: SettingsSection }) {
             <Section title="Play time" hint="Counts toward the community statistics, and toward what people are playing right now (a number per game, never who). The play-time board only shows public profiles.">
               <Check checked={s.sharePlaytime} onChange={(v) => set('sharePlaytime', v)} label="Share my play time and what I am playing with kryo.to" />
             </Section>
+            <GraphicsSection />
           </>
         ) : null}
         {section === 'compat' ? <CompatPane s={s} set={set} /> : null}
@@ -388,5 +389,54 @@ function SoundCheck() {
       }}
       label="Play a short sound when a game is ready, while Kryoto Desktop is in front"
     />
+  )
+}
+
+const DISPLAY_HINT: Record<DisplayMode, string> = {
+  auto: 'Hardware rendering, except where it is known to break: NVIDIA drivers and machines without a GPU render device.',
+  compatible: 'Draws on anything, a little slower. Use it when pages are blank, flicker or are drawn in the wrong place.',
+  full: 'Hardware rendering everywhere. Only if Automatic picked Compatible and your machine handles the fast path.',
+}
+
+/**
+ * How the Linux build draws its window (src-tauri/src/display_env.rs). Shown
+ * only there; takes effect on the next start.
+ */
+function GraphicsSection() {
+  const [state, setState] = useState<DisplayState | null>(null)
+  const [picked, setPicked] = useState<DisplayMode | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    void displayApi
+      .state()
+      .then(setState)
+      .catch(() => setState(null))
+  }, [])
+  if (!state) return null
+  const mode = picked ?? state.mode
+  const choose = (m: DisplayMode) => {
+    setError(null)
+    void displayApi
+      .setMode(m)
+      .then(() => setPicked(m))
+      .catch((e: unknown) => setError(errorText(e)))
+  }
+  return (
+    <Section title="Graphics" hint={DISPLAY_HINT[mode]}>
+      <Segmented
+        value={mode}
+        options={[
+          { value: 'auto', label: 'Automatic' },
+          { value: 'compatible', label: 'Compatible' },
+          { value: 'full', label: 'Full' },
+        ]}
+        onChange={(v) => choose(v as DisplayMode)}
+      />
+      <p className="text-[11px] text-muted-foreground">
+        {state.healed ? 'The last start did not draw its window, so Kryoto switched to Compatible. ' : ''}
+        Now: {state.reason}.{picked && picked !== state.mode ? ' Restart Kryoto to use the new setting.' : ''}
+      </p>
+      {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
+    </Section>
   )
 }

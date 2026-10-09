@@ -54,6 +54,7 @@ sharing its data, and never send error reports.
 | `src-tauri/src/system.rs` | tray, single instance, start with Windows, window state |
 | `src-tauri/src/menus.rs` | the menu view: menus drawn in a web view stacked over the Store, inside the main window |
 | `src-tauri/src/linux_overlay.rs` | Linux: laying the Store and the menu view over the shell, and resizing from the window's edges |
+| `src-tauri/src/display_env.rs` | Linux: picking WebKitGTK's renderer per machine, and falling back by itself when a start never draws |
 | `src/lib/history.ts` | the one Back / Forward history for the Library, the Store's pages and everything else |
 | `src/lib/updates.ts`, `src/shell/UpdatePrompt.tsx` | the in-app updater: the check on launch, the prompt, Check for updates in About |
 | `src-tauri/src/logging.rs` | the log file, crash capture, reports to kryo.to |
@@ -61,6 +62,16 @@ sharing its data, and never send error reports.
 | `src/shell`, `src/library`, `src/downloads`, `src/settings`, `src/community`, `src/friends` | the app |
 | `src/ui/ascii` | the K// mark (traced from kryo.to's) and the block lettering, as vectors |
 | `scripts/brand.mjs` | icons and installer art, generated from the same code |
+
+## Linux graphics
+
+WebKitGTK's fast (DMA-BUF) renderer breaks on NVIDIA's driver and on machines
+without a GPU render device, and works everywhere else. Kryoto picks per
+machine (Settings > General > Graphics: Automatic, Compatible, Full), and if a
+start never draws its window, the next one switches to Compatible by itself.
+To force a mode for one run: `KRYOTO_GPU=compatible kryoto` (or `full`).
+`WEBKIT_DISABLE_DMABUF_RENDERER` and `WEBKIT_DISABLE_COMPOSITING_MODE`, when
+you set them yourself, always win.
 
 ## Tests
 

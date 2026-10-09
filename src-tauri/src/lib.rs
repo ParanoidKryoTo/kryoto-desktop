@@ -2,6 +2,7 @@ mod addons;
 mod art;
 mod chat;
 mod compat;
+mod display_env;
 mod downloads;
 mod handoff;
 mod launch;
@@ -705,36 +706,6 @@ fn store_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Linux defaults that make the client behave, set before GTK starts. Each is
-/// left alone when the environment already sets it, so anyone can opt out.
-///
-/// * `GDK_BACKEND=x11` on a Wayland session (through XWayland). The client
-///   moves, centres and resizes its own frameless window, which Wayland does
-///   not let a window do; the menus live inside the window now, but those
-///   still need it.
-/// * `WEBKIT_DISABLE_DMABUF_RENDERER=1`: WebKitGTK's DMA-BUF renderer draws
-///   blank, torn or offset pages on many drivers (NVIDIA in particular).
-#[cfg(target_os = "linux")]
-fn is_nvidia() -> bool {
-    // Checks if kernel module "linux" is loaded
-    std::fs::read_to_string("/proc/modules")
-        .map(|m| m.lines().any(|line| line.starts_with("nvidia ")))
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_env() {
-    let unset = |key: &str| std::env::var_os(key).is_none_or(|v| v.is_empty());
-    
-    if unset("GDK_BACKEND") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        std::env::set_var("GDK_BACKEND", "x11");
-    }
-
-    // Turns off DMABUF ONLY for nvidia cards
-    if unset("WEBKIT_DISABLE_DMABUF_RENDERER") && is_nvidia() {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
-}
 /// A mouse back/forward button pressed in the Store: the shell steps its one
 /// history, as its arrows do.
 #[tauri::command]
@@ -974,8 +945,7 @@ fn control_catalog(app: tauri::AppHandle, action: String) -> Result<(), String> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(target_os = "linux")]
-    linux_env();
+    display_env::apply();
     let instance = system::claim_instance();
     if matches!(instance, system::Instance::AlreadyRunning) {
         // The copy already running has been asked to come to the front.
@@ -999,6 +969,9 @@ pub fn run() {
         .manage(chat::ChatState::default())
         .setup(move |app| {
             logging::init(app.handle());
+            if let Some(how) = display_env::describe() {
+                logging::info("display", &how);
+            }
             logging::start_reporter(app.handle().clone());
             // Off the main thread: registry and xdg-mime are not worth a frame.
             std::thread::spawn(links::register);
@@ -1112,6 +1085,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             links::take_pending_link,
+            display_env::display_rendered,
+            display_env::display_state,
+            display_env::display_set_mode,
             chat::chat_status,
             chat::chat_enable,
             chat::chat_remove_device,

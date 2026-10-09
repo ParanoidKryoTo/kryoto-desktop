@@ -122,6 +122,17 @@ function publish(s: Settings) {
   subscribers.forEach((fn) => fn(s))
 }
 
+/** How the Linux build draws its window (src-tauri/src/display_env.rs). */
+export type DisplayMode = 'auto' | 'compatible' | 'full'
+export type DisplayState = { mode: DisplayMode; reason: string; healed: boolean }
+
+export const displayApi = {
+  /** Null outside the Linux build. */
+  state: () => call<DisplayState | null>('display_state'),
+  /** Takes effect on the next start. */
+  setMode: (mode: DisplayMode) => call<void>('display_set_mode', { mode }),
+}
+
 export const settingsApi = {
   /** The K// username games get, remembered from the last sign-in. Null for a guest. */
   playerAccountName: () => call<string | null>('player_account_name'),
