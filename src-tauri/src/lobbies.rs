@@ -24,8 +24,9 @@ use crate::library::Running;
 
 /// The app id every Kryoto Online game runs as.
 const SPACEWAR: &str = "480";
-/// A lobby file older than this is from an earlier session.
-const FRESH_SECS: u64 = 6 * 3600;
+/// Kryoto Online rewrites its file every 30 seconds while the game is in a
+/// lobby (include/lobby_watch.h there); one older than this is left over.
+const FRESH_SECS: u64 = 120;
 
 pub fn is_steam_id(s: &str) -> bool {
     (1..=20).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
@@ -59,11 +60,19 @@ fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// A folder Kryoto Online may have written lobby files to, and whether the
+/// pids in it are this machine's. Under Wine they are Wine's own numbers,
+/// which mean nothing to the host, so there only freshness counts.
+struct LobbyDir {
+    path: PathBuf,
+    host_pids: bool,
+}
+
 /// Folders Kryoto Online may have written lobby files to.
-fn lobby_dirs<R: Runtime>(app: &AppHandle<R>, game_id: &str) -> Vec<PathBuf> {
+fn lobby_dirs<R: Runtime>(app: &AppHandle<R>, game_id: &str) -> Vec<LobbyDir> {
     let mut dirs = Vec::new();
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        dirs.push(PathBuf::from(local).join("Kryoto").join("online"));
+        dirs.push(LobbyDir { path: PathBuf::from(local).join("Kryoto").join("online"), host_pids: true });
     }
     // Wine/Proton: the game's own prefix, any user inside it.
     if let Ok(data) = app.path().app_data_dir() {
@@ -71,7 +80,8 @@ fn lobby_dirs<R: Runtime>(app: &AppHandle<R>, game_id: &str) -> Vec<PathBuf> {
         for drive in [prefix.join("pfx").join("drive_c"), prefix.join("drive_c")] {
             if let Ok(users) = std::fs::read_dir(drive.join("users")) {
                 for u in users.flatten() {
-                    dirs.push(u.path().join("AppData").join("Local").join("Kryoto").join("online"));
+                    let path = u.path().join("AppData").join("Local").join("Kryoto").join("online");
+                    dirs.push(LobbyDir { path, host_pids: false });
                 }
             }
         }
@@ -80,10 +90,10 @@ fn lobby_dirs<R: Runtime>(app: &AppHandle<R>, game_id: &str) -> Vec<PathBuf> {
 }
 
 /// The freshest lobby among files whose process is alive, preferring `pid`.
-fn pick(dirs: &[PathBuf], pid: Option<u32>, alive: impl Fn(u32) -> bool) -> Option<Lobby> {
+fn pick(dirs: &[LobbyDir], pid: Option<u32>, alive: impl Fn(u32) -> bool) -> Option<Lobby> {
     let mut best: Option<(bool, u64, Lobby)> = None;
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir.path) else { continue };
         for e in entries.flatten() {
             let path = e.path();
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
@@ -93,10 +103,10 @@ fn pick(dirs: &[PathBuf], pid: Option<u32>, alive: impl Fn(u32) -> bool) -> Opti
             if !is_steam_id(&f.lobby) || (!f.host.is_empty() && !is_steam_id(&f.host)) {
                 continue;
             }
-            if now().saturating_sub(f.updated_at) > FRESH_SECS || !alive(f.pid) {
+            if now().saturating_sub(f.updated_at) > FRESH_SECS || (dir.host_pids && !alive(f.pid)) {
                 continue;
             }
-            let exact = Some(f.pid) == pid;
+            let exact = dir.host_pids && Some(f.pid) == pid;
             let lobby = Lobby { lobby: f.lobby, host_steam_id: f.host };
             let better = match &best {
                 None => true,
@@ -178,10 +188,15 @@ mod tests {
         write("40.json", format!(r#"{{"pid":40,"lobby":"4; rm","host":"7","updatedAt":{t}}}"#));
         write("50.json", format!(r#"{{"pid":50,"lobby":"555","host":"7","updatedAt":{t}}}"#));
         let alive = |pid: u32| pid != 50;
-        let dirs = vec![dir.clone()];
+        let dirs = vec![LobbyDir { path: dir.clone(), host_pids: true }];
         assert_eq!(pick(&dirs, Some(20), alive).map(|l| l.lobby).as_deref(), Some("222"), "the game's own process first");
         assert_eq!(pick(&dirs, Some(99), alive).map(|l| l.lobby).as_deref(), Some("111"), "else the newest live one");
         assert_eq!(pick(&dirs, None, |p| p == 30 || p == 40), None, "stale and unsafe entries are skipped");
+        // Wine's pids are not the host's: a fresh file counts even though no
+        // host process has its number.
+        let wine = vec![LobbyDir { path: dir.clone(), host_pids: false }];
+        let got = pick(&wine, Some(20), |_| false).map(|l| l.lobby);
+        assert!(matches!(got.as_deref(), Some("111" | "555")), "a newest fresh one, whatever its pid: {got:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
