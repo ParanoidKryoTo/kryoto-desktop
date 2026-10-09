@@ -9,7 +9,7 @@
 // After building it checks the binary and fails if the home folder is still in it.
 
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +27,26 @@ const remaps = [
 ]
 const flags = remaps.map(([from, to]) => `--remap-path-prefix=${from}=${to}`).join(' ')
 const env = { ...process.env, RUSTFLAGS: [process.env.RUSTFLAGS, flags].filter(Boolean).join(' ') }
+
+// On Windows the build must not see Git's MSYS tools: in a bash step they
+// sit ahead of everything on PATH, so OpenSSL's Configure finds MSYS perl
+// (missing modules it needs) and the linker resolves to MSYS `link` instead
+// of MSVC's. Drop those directories and put the real toolchain first. This
+// runs for local builds too, where the same shadowing bites Git Bash users.
+if (process.platform === 'win32') {
+  const sep = ';'
+  const parts = (env.PATH || '').split(sep)
+  const shadow = /(^|[\\/])git[\\/](usr|mingw64)[\\/]bin[\\/]?$/i
+  const kept = parts.filter((p) => !shadow.test(p.replace(/\//g, '\\')))
+  const first = []
+  const linker = env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
+  if (linker && existsSync(linker)) first.push(path.dirname(linker))
+  for (const dir of ['C:\\Strawberry\\perl\\bin', 'C:\\Program Files\\NASM']) {
+    if (existsSync(dir)) first.push(dir)
+  }
+  const seen = new Set()
+  env.PATH = [...first, ...kept].filter((p) => p && !seen.has(p.toLowerCase()) && (seen.add(p.toLowerCase()), true)).join(sep)
+}
 
 const run = spawnSync(['pnpm tauri build', ...process.argv.slice(2)].join(' '), { cwd: root, env, stdio: 'inherit', shell: true })
 if (run.status !== 0) process.exit(run.status ?? 1)
