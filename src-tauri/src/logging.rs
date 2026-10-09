@@ -195,7 +195,7 @@ pub fn start_reporter<R: Runtime>(app: AppHandle<R>) {
 
 /// A random id for this install, so reports from one machine group together
 /// without saying whose machine it is.
-fn install_id<R: Runtime>(app: &AppHandle<R>) -> String {
+pub(crate) fn install_id<R: Runtime>(app: &AppHandle<R>) -> String {
     let Ok(dir) = app.path().app_data_dir() else { return "unknown".into() };
     let file = dir.join("install-id");
     if let Ok(id) = std::fs::read_to_string(&file) {

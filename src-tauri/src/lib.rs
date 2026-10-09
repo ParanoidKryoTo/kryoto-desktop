@@ -4,6 +4,7 @@ mod chat;
 mod compat;
 mod display_env;
 mod game_logs;
+mod remote;
 mod downloads;
 mod handoff;
 mod launch;
@@ -463,6 +464,38 @@ const BROWSER_STATE_SCRIPT: &str = r#"
   let whoTimer = 0;
   const soon = () => { clearTimeout(whoTimer); whoTimer = setTimeout(() => who(false), 800); };
   window.__kryoDesktopRefresh = () => who(true);
+  // Kryoto Desktop from the website (kryo.to lib/desktop-remote.ts, remote.rs):
+  // take what was queued there, hand it to the downloader, and report the
+  // downloads' progress back whenever it changes (and every half minute).
+  let remoteBusy = false;
+  let lastReport = '';
+  let lastReportAt = 0;
+  const post = (path, body) => fetch(path, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    .then((r) => (r.ok ? r.json() : null));
+  const remote = async () => {
+    if (!KRYO || !me || remoteBusy || document.visibilityState === 'prerender') return;
+    remoteBusy = true;
+    try {
+      const snap = await invoke('remote_snapshot');
+      if (!snap || !snap.installId) return;
+      const taken = await post('/api/desktop/remote/take', { installId: snap.installId }).catch(() => null);
+      let now = snap;
+      if (taken && Array.isArray(taken.commands) && taken.commands.length) {
+        await invoke('remote_apply', { commands: taken.commands });
+        now = (await invoke('remote_snapshot')) || snap;
+      }
+      const body = JSON.stringify(now.downloads);
+      if (body !== lastReport || Date.now() - lastReportAt > 30000) {
+        lastReport = body;
+        lastReportAt = Date.now();
+        await post('/api/desktop/remote/report', now).catch(() => null);
+      }
+    } catch (_) {
+    } finally {
+      remoteBusy = false;
+    }
+  };
+  setInterval(remote, 4000);
   // kryo.to names a download right before it starts it (the site's
   // game-downloads.tsx): the download can reach the app without the
   // address's #fragment, so this is the context that holds.
@@ -1088,6 +1121,8 @@ pub fn run() {
             links::take_pending_link,
             display_env::display_rendered,
             game_logs::game_logs,
+            remote::remote_snapshot,
+            remote::remote_apply,
             game_logs::game_log_read,
             game_logs::game_logs_folder,
             display_env::display_state,
