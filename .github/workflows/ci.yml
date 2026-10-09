@@ -90,6 +90,26 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      # SQLCipher compiles OpenSSL from source, which needs a full Perl
+      # (MSYS/Git's is missing modules Configure needs), NASM, and MSVC.
+      # The linker is pinned by path as well: in a bash step Git's own
+      # `link.exe` shadows MSVC's on PATH.
+      - name: OpenSSL toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          [ -d "C:/Strawberry/perl/bin" ] || { echo "::error::Strawberry Perl is gone from the runner image."; exit 1; }
+          echo "C:/Strawberry/perl/bin" >> "$GITHUB_PATH"
+          choco install nasm -y --no-progress
+          VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          LINK=$("$VSWHERE" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC/Tools/MSVC/*/bin/Hostx64/x64/link.exe' | head -1)
+          [ -n "$LINK" ] || { echo "::error::No MSVC link.exe found."; exit 1; }
+          echo "MSVC link.exe: $LINK"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$(echo "$LINK" | sed 's|\\|/|g')" >> "$GITHUB_ENV"
+          export PATH="/c/Strawberry/perl/bin:$PATH"
+          which perl; which nasm
+      - uses: ilammy/msvc-dev-cmd@v1
+
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: |
