@@ -1,7 +1,21 @@
-import { useState } from 'react'
-import { KeyRound, Lock, Power, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react'
-import { errorText } from '@/lib/bridge'
-import { chatEnable, chatRemoveDevice, chatResetIdentity, chatRestore, chatStatusText, chatUnlock, Here, here, useChatStatus } from '@/lib/chat'
+import { useEffect, useState } from 'react'
+import { Bell, BellOff, KeyRound, Lock, Power, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react'
+import { errorText, isWeb } from '@/lib/bridge'
+import {
+  chatEnable,
+  chatPushDisable,
+  chatPushEnable,
+  chatPushState,
+  chatRemoveDevice,
+  chatResetIdentity,
+  chatRestore,
+  chatStatusText,
+  chatUnlock,
+  Here,
+  here,
+  useChatStatus,
+  type PushState,
+} from '@/lib/chat'
 import { Button, Caption, inputCls, Modal } from '@/ui'
 import { ChatSecurity } from './ChatSecurity'
 
@@ -139,6 +153,8 @@ export function ChatSetup({ available }: { available: boolean }) {
         ) : null}
       </div>
 
+      {online && isWeb() ? <BrowserNotifications /> : null}
+
       {security ? <ChatSecurity onClose={() => setSecurity(false)} /> : null}
 
       {asking === 'enable' ? (
@@ -246,6 +262,49 @@ export function ChatSetup({ available }: { available: boolean }) {
           <p className="text-xs text-muted-foreground">Your account and your friends are not affected.</p>
         </Modal>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * The web chat's notifications while its tab is closed. The push carries no
+ * message (it is end-to-end encrypted and stays on the server), so the notice
+ * only says that something is waiting.
+ */
+function BrowserNotifications() {
+  const [state, setState] = useState<PushState | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    void chatPushState()
+      .then(setState)
+      .catch(() => setState(null))
+  }, [])
+  if (!state?.supported) return null
+  const flip = () => {
+    setBusy(true)
+    setError(null)
+    // No await before this: the permission prompt must open inside the click.
+    void (state.on ? chatPushDisable() : chatPushEnable())
+      .then(() => chatPushState().then(setState))
+      .catch((e: unknown) => setError(errorText(e)))
+      .finally(() => setBusy(false))
+  }
+  return (
+    <div className="grid gap-1.5 border-t border-border pt-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs text-foreground">{state.on ? 'Notifications are on in this browser.' : 'Get a notification when a message arrives and this tab is closed.'}</span>
+        <Button size="sm" disabled={busy || (!state.on && state.permission === 'denied')} onClick={flip}>
+          {state.on ? <BellOff className="size-3" aria-hidden /> : <Bell className="size-3" aria-hidden />}
+          {state.on ? 'Turn off' : 'Turn on'}
+        </Button>
+      </div>
+      {state.permission === 'denied' && !state.on ? (
+        <p className="text-[11px] text-muted-foreground">Notifications are blocked for this site. Allow them in the browser's site settings first.</p>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">The notice never shows who wrote or what: only that something is waiting.</p>
+      )}
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </div>
   )
 }

@@ -84,6 +84,8 @@ export class WebChat {
   private queue: Promise<void> = Promise.resolve()
   private stopped = false
   private backoff = 1
+  /** The gateway's VAPID key (hex), empty when it sends no pushes. */
+  private pushKey = ''
 
   private constructor(
     private kryo: Kryo,
@@ -212,11 +214,13 @@ export class WebChat {
         }
         if (phase === 'ready' && f.type === 'ready') {
           phase = 'live'
+          this.pushKey = typeof f.pushKey === 'string' ? f.pushKey : ''
           void this.settle(f)
             .then(() => {
               this.backoff = 1
               this.setStatus({ state: 'online', userId: f.userId, deviceId: f.deviceId })
               void this.resendPending()
+              void this.pushResync()
             })
             .catch((e: unknown) => finish(e && typeof e === 'object' && 'stop' in e ? (e as { stop: ChatStatus }) : { retry: String(e) }))
           return
@@ -845,6 +849,68 @@ export class WebChat {
     await this.persist()
   }
 
+  // ---- web push ------------------------------------------------------------
+  //
+  // With the tab closed, the gateway sends this browser an empty push when a
+  // message arrives (kryoto-gateway src/push.rs) and public/chat-sw.js shows
+  // "New message". Nothing about the message passes through the push service.
+
+  private async pushRegistration(): Promise<ServiceWorkerRegistration | null> {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null
+    return navigator.serviceWorker.register('/chat-sw.js', { scope: '/' })
+  }
+
+  async pushState(): Promise<{ supported: boolean; permission: NotificationPermission | 'unsupported'; on: boolean }> {
+    const supported = !!this.pushKey && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
+    if (!supported) return { supported: false, permission: 'unsupported', on: false }
+    const reg = await navigator.serviceWorker.getRegistration('/')
+    const sub = reg ? await reg.pushManager.getSubscription() : null
+    return { supported, permission: Notification.permission, on: !!sub && Notification.permission === 'granted' }
+  }
+
+  /** Ask for permission (inside the click), subscribe, and hand the endpoint to the gateway. */
+  async pushEnable(): Promise<void> {
+    if (!this.pushKey) throw new Error('Notifications are not available on this chat server.')
+    const permission = await Notification.requestPermission()
+    if (permission !== 'granted') throw new Error('Notifications are blocked for chat.kryo.to in this browser.')
+    const reg = await this.pushRegistration()
+    if (!reg) throw new Error('This browser cannot receive notifications.')
+    await navigator.serviceWorker.ready
+    const key = hexToBytes(this.pushKey)
+    let sub = await reg.pushManager.getSubscription()
+    // A subscription made with another server key cannot be used: start over.
+    if (sub && !sameKey(sub.options.applicationServerKey, key)) {
+      await sub.unsubscribe()
+      sub = null
+    }
+    sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key as BufferSource })
+    await this.ask('pushSubscribe', { endpoint: sub.endpoint })
+    await this.store.set('push-endpoint', sub.endpoint)
+  }
+
+  async pushDisable(): Promise<void> {
+    const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration('/') : undefined
+    const sub = reg ? await reg.pushManager.getSubscription() : null
+    await sub?.unsubscribe()
+    await this.store.set('push-endpoint', '')
+    await this.ask('pushUnsubscribe').catch(() => {})
+  }
+
+  /** After each connect: a browser may have rotated its endpoint since we last told the gateway. */
+  private async pushResync() {
+    try {
+      if (!this.pushKey || !('serviceWorker' in navigator) || Notification.permission !== 'granted') return
+      const reg = await navigator.serviceWorker.getRegistration('/')
+      const sub = reg ? await reg.pushManager.getSubscription() : null
+      if (!sub) return
+      if ((await this.store.get<string>('push-endpoint')) === sub.endpoint) return
+      await this.ask('pushSubscribe', { endpoint: sub.endpoint })
+      await this.store.set('push-endpoint', sub.endpoint)
+    } catch {
+      // Next connect tries again.
+    }
+  }
+
   async backupStatus() {
     const f = await this.ask('backupGet')
     const code = await this.store.get<string>('backup-code')
@@ -974,4 +1040,16 @@ export class WebChat {
       .filter((m) => wanted.has(m.msgId) && !m.deleted && (m.outgoing || m.senderUser === peer))
       .map((m) => ({ sentAt: m.sentAt, mine: m.outgoing, kind: m.kind, text: this.shown(m).body }))
   }
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  return out
+}
+
+function sameKey(a: ArrayBuffer | null | undefined, b: Uint8Array): boolean {
+  if (!a) return false
+  const x = new Uint8Array(a)
+  return x.length === b.length && x.every((v, i) => v === b[i])
 }

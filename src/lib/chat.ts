@@ -235,6 +235,13 @@ export const chatVerifyInfo = (peer: string) => call<VerifyInfo>('chat_verify_in
 export const chatVerifyMark = (peer: string, verified: boolean) => call<void>('chat_verify_mark', { peer, verified })
 export const chatIdentityAck = (peer: string) => call<void>('chat_identity_ack', { peer })
 export const chatBackupStatus = () => call<BackupStatus>('chat_backup_status')
+
+/** Browser notifications for the web chat (an empty push; see src/web/engine.ts). */
+export type PushState = { supported: boolean; permission: NotificationPermission | 'unsupported'; on: boolean }
+export const chatPushState = () => call<PushState>('chat_push_state')
+/** Call straight from the click: the browser only asks for permission inside one. */
+export const chatPushEnable = () => call<void>('chat_push_enable')
+export const chatPushDisable = () => call<void>('chat_push_disable')
 /** Returns the recovery code, shown once. */
 export const chatBackupCreate = () => call<string>('chat_backup_create')
 export const chatBackupDelete = () => call<void>('chat_backup_delete')
