@@ -15,11 +15,30 @@ export function isTauri() {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
+/**
+ * The web chat (chat.kryo.to, src/web) answers the same calls in the
+ * browser, with km-core compiled to WebAssembly. It registers itself here;
+ * the desktop app never does.
+ */
+export type Backend = {
+  call: (command: string, args: Record<string, unknown>) => Promise<unknown>
+  on: (event: string, handler: (payload: unknown) => void) => () => void
+}
+let web: Backend | null = null
+export function useWebBackend(b: Backend) {
+  web = b
+}
+export function isWeb() {
+  return web !== null
+}
+
 export function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (web) return web.call(command, args ?? {}) as Promise<T>
   return isTauri() ? invoke<T>(command, args) : previewCall<T>(command, args)
 }
 
 export function on<T>(event: string, handler: (payload: T) => void): Promise<() => void> {
+  if (web) return Promise.resolve(web.on(event, handler as (p: unknown) => void))
   if (isTauri()) return listen<T>(event, (e) => handler(e.payload))
   return Promise.resolve(previewBus.on(event, handler as (p: unknown) => void))
 }

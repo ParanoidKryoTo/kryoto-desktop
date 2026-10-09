@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { isTauri, on } from '@/lib/bridge'
+import { isTauri, isWeb, on } from '@/lib/bridge'
 
 /**
  * The friends list, as the Store's page reports it from kryo.to's
@@ -54,7 +54,7 @@ const PREVIEW: FriendsState = {
 let last: FriendsState | null = null
 
 export function useFriends(): FriendsState | null {
-  const [state, setState] = useState<FriendsState | null>(isTauri() ? last : PREVIEW)
+  const [state, setState] = useState<FriendsState | null>(isTauri() || isWeb() ? last : PREVIEW)
   useEffect(() => {
     let stop: (() => void) | undefined
     let cancelled = false

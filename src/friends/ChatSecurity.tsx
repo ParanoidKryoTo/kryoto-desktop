@@ -8,6 +8,8 @@ import {
   chatDeviceRevoke,
   chatDevices,
   chatExportHistory,
+  here,
+  Here,
   type BackupStatus,
   type MyDevice,
 } from '@/lib/chat'
@@ -105,7 +107,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
         ) : backup.exists ? (
           <p className="text-xs text-foreground">
             Backed up, last updated {day(backup.updatedAtMs)}.
-            {backup.keptHere ? ' This PC keeps it up to date.' : ''}
+            {backup.keptHere ? ` ${Here()} keeps it up to date.` : ''}
           </p>
         ) : (
           <p className="text-xs text-foreground">No backup yet.</p>
@@ -133,7 +135,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
                 <span className="grid min-w-0">
                   <b className="truncate text-xs text-foreground">
                     {d.name || (d.kind === 'web' ? 'Web browser' : 'PC')}
-                    {d.current ? ' (this PC)' : ''}
+                    {d.current ? ` (${here()})` : ''}
                   </b>
                   <span className="text-[11px] text-muted-foreground">
                     Added {day(d.createdAtMs)}, last used {day(d.lastSeenDayMs)}
@@ -154,7 +156,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
       <section className="grid gap-2">
         <Caption>Your messages</Caption>
         <p className="text-xs text-muted-foreground">
-          Your chat history lives only on your devices. Save a copy of everything on this PC as a file. The file is not
+          Your chat history lives only on your devices. Save a copy of everything on {here()} as a file. The file is not
           encrypted: anyone who opens it can read it.
         </p>
         <div>
@@ -187,7 +189,7 @@ export function ChatSecurity({ onClose }: { onClose: () => void }) {
             </>
           }
         >
-          <p className="text-sm text-foreground">Your recovery code stops working. Chat on this PC keeps working.</p>
+          <p className="text-sm text-foreground">Your recovery code stops working. Chat on {here()} keeps working.</p>
         </Modal>
       ) : null}
       {confirm === 'new-code' ? (

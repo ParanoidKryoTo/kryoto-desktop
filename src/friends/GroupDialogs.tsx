@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Crown, LogOut, Shield, UserMinus } from 'lucide-react'
 import { errorText } from '@/lib/bridge'
-import { chatGroupAdd, chatGroupCreate, chatGroupRemove, chatGroupRename, type GroupView } from '@/lib/chat'
+import { chatGroupAdd, chatGroupCreate, chatGroupRemove, chatGroupRename, here, type GroupView } from '@/lib/chat'
 import { friendName, type FriendFace } from '@/hooks/useFriends'
 import { Button, Caption, Check, inputCls, Modal } from '@/ui'
 
@@ -156,7 +156,7 @@ export function GroupMembersDialog({
           </>
         }
       >
-        <p className="text-sm text-foreground">You stop getting its messages. What was said stays on this PC.</p>
+        <p className="text-sm text-foreground">You stop getting its messages. What was said stays on {here()}.</p>
         {error ? <p className="text-xs text-destructive">{error}</p> : null}
       </Modal>
     )

@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
-import { call, on } from '@/lib/bridge'
+import { call, isWeb, on } from '@/lib/bridge'
+
+/** "this PC" in the app, "this browser" in the web chat. */
+export const here = () => (isWeb() ? 'this browser' : 'this PC')
+export const Here = () => (isWeb() ? 'This browser' : 'This PC')
 
 /**
  * Chat on this PC, as the native side reports it (src-tauri/src/chat).
@@ -46,7 +50,7 @@ export function useChatStatus(): ChatStatus | null {
 export function chatStatusText(s: ChatStatus): string {
   switch (s.state) {
     case 'off':
-      return 'Chat is off on this PC.'
+      return `Chat is off on ${here()}.`
     case 'connecting':
       return 'Connecting...'
     case 'online':
@@ -62,7 +66,7 @@ export function chatStatusText(s: ChatStatus): string {
     case 'needsLink':
       return 'Your account already uses chat on another device. Restore it here with your recovery code, or start a new chat identity.'
     case 'deviceRemoved':
-      return 'This PC was removed from your chat devices. Remove chat here, then turn it on again.'
+      return `${Here()} was removed from your chat devices. Remove chat here, then turn it on again.`
     case 'locked':
       return s.creating
         ? 'This system has no secure key store, so a passphrase protects chat here. Choose one.'

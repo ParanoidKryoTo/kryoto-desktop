@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { KeyRound, Lock, Power, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react'
 import { errorText } from '@/lib/bridge'
-import { chatEnable, chatRemoveDevice, chatResetIdentity, chatRestore, chatStatusText, chatUnlock, useChatStatus } from '@/lib/chat'
+import { chatEnable, chatRemoveDevice, chatResetIdentity, chatRestore, chatStatusText, chatUnlock, Here, here, useChatStatus } from '@/lib/chat'
 import { Button, Caption, inputCls, Modal } from '@/ui'
 import { ChatSecurity } from './ChatSecurity'
 
@@ -60,7 +60,7 @@ export function ChatSetup({ available }: { available: boolean }) {
     <div className="kryo-radius grid w-full max-w-md gap-3 border border-border p-4 text-left">
       <div className="flex items-center gap-2">
         <Lock className="size-3.5 text-muted-foreground" aria-hidden />
-        <Caption>Chat on this PC</Caption>
+        <Caption>Chat on {here()}</Caption>
       </div>
       <p className="text-xs text-foreground" aria-live="polite">
         {busy ? 'Working...' : chatStatusText(status)}
@@ -99,7 +99,7 @@ export function ChatSetup({ available }: { available: boolean }) {
               {status.creating ? 'Set passphrase' : 'Unlock'}
             </Button>
             {status.creating ? (
-              <span className="text-[11px] text-muted-foreground">Forget it and chat on this PC has to start over.</span>
+              <span className="text-[11px] text-muted-foreground">Forget it and chat on {here()} has to start over.</span>
             ) : null}
           </div>
         </form>
@@ -134,7 +134,7 @@ export function ChatSetup({ available }: { available: boolean }) {
         {on ? (
           <Button variant="danger" size="sm" disabled={busy} onClick={() => setAsking('remove')}>
             <Trash2 className="size-3" aria-hidden />
-            Remove from this PC
+            Remove from {here()}
           </Button>
         ) : null}
       </div>
@@ -189,7 +189,7 @@ export function ChatSetup({ available }: { available: boolean }) {
           }
         >
           <p className="text-sm text-foreground">
-            Type the recovery code you saved when you turned on your key backup. This PC then uses the same chat
+            Type the recovery code you saved when you turned on your key backup. {Here()} then uses the same chat
             identity as your other devices, and your friends see no warning.
           </p>
           <textarea
@@ -202,7 +202,7 @@ export function ChatSetup({ available }: { available: boolean }) {
             aria-label="Recovery code"
             className="kryo-radius w-full resize-none border border-border bg-background px-3 py-2 font-mono text-sm uppercase tracking-wider text-foreground outline-none focus:border-foreground"
           />
-          <p className="text-xs text-muted-foreground">Messages from before are not on this PC: history stays on each device.</p>
+          <p className="text-xs text-muted-foreground">Messages from before are not on {here()}: history stays on each device.</p>
         </Modal>
       ) : null}
 
@@ -229,7 +229,7 @@ export function ChatSetup({ available }: { available: boolean }) {
 
       {asking === 'remove' ? (
         <Modal
-          title="Remove chat from this PC?"
+          title={`Remove chat from ${here()}?`}
           onClose={() => setAsking(null)}
           footer={
             <>
@@ -241,7 +241,7 @@ export function ChatSetup({ available }: { available: boolean }) {
           }
         >
           <p className="text-sm text-foreground">
-            This deletes this PC's chat keys and its message history, and signs it out of chat. It cannot be undone.
+            This deletes the chat keys and message history on {here()}, and signs it out of chat. It cannot be undone.
           </p>
           <p className="text-xs text-muted-foreground">Your account and your friends are not affected.</p>
         </Modal>
