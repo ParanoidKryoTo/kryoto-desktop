@@ -107,6 +107,13 @@ pub struct Download {
     /// Place in the queue: the lowest waiting one goes next. Changed by
     /// moving it up or down, or "Download now" (`download_move`).
     pub queue_order: u64,
+    /// The file's ETag when the download started. A resume checks every
+    /// range against it, so a file replaced on the server is started over
+    /// instead of having its bytes stitched onto the old one's.
+    pub etag: Option<String>,
+    /// What it is waiting on right now, for the Downloads page ("Connection
+    /// lost. Trying again in 8 s."). Cleared once bytes move again.
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -186,9 +193,124 @@ impl Limiter {
 /// The longest a transfer waits for data before it looks at Pause and Cancel.
 const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How long a connection may go without a byte before it is dropped and
+/// opened again. Without it a connection that went quiet without closing (a
+/// router dropping state, a server restarting behind a proxy) waited forever:
+/// the download sat at 0 B/s until the player paused and resumed it by hand.
+const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a server has to start answering a request.
+const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Tries in a row, without a byte arriving, before a download gives up and
+/// waits for the player. Spaced out (`backoff`), they ride out a few minutes
+/// of lost connection; any progress starts the count again.
+const MAX_FAILURES: u32 = 10;
+
+/// Tries for one range on its own connection before the whole transfer
+/// steps back and starts again from where every range got to.
+const RANGE_RETRIES: u32 = 3;
+
+/// Seconds to wait before try `n` (from 1): 2, 4, 8, 16, 30, then a minute.
+fn backoff(n: u32) -> u64 {
+    match n {
+        0 | 1 => 2,
+        2 => 4,
+        3 => 8,
+        4 => 16,
+        5 => 30,
+        _ => 60,
+    }
+}
+
+/// The HTTP client every download of ours starts from.
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
+        .tcp_nodelay(true)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .pool_max_idle_per_host(64)
+}
+
+/// Send, giving up when the server takes longer than `ANSWER_TIMEOUT` to answer.
+async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, Transfer> {
+    match tokio::time::timeout(ANSWER_TIMEOUT, request.send()).await {
+        Ok(Ok(res)) => Ok(res),
+        Ok(Err(e)) => Err(Transfer::Retry(e.to_string())),
+        Err(_) => Err(Transfer::Retry("the server took too long to answer".into())),
+    }
+}
+
+/// A `Content-Range` header: `bytes 100-199/1000`, or `bytes */1000` on a 416.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentRange {
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+    pub total: Option<u64>,
+}
+
+pub fn parse_content_range(value: &str) -> Option<ContentRange> {
+    let rest = value.trim().strip_prefix("bytes")?.trim_start();
+    let (span, total) = rest.split_once('/')?;
+    let total = match total.trim() {
+        "*" => None,
+        t => Some(t.parse().ok()?),
+    };
+    let (start, end) = match span.trim() {
+        "*" => (None, None),
+        s => {
+            let (a, b) = s.split_once('-')?;
+            (Some(a.trim().parse().ok()?), Some(b.trim().parse().ok()?))
+        }
+    };
+    Some(ContentRange { start, end, total })
+}
+
+fn content_range_of(res: &reqwest::Response) -> Option<ContentRange> {
+    res.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).and_then(parse_content_range)
+}
+
+/// The response's ETag, without a weak marker, for comparing two answers.
+fn etag_of(res: &reqwest::Response) -> Option<String> {
+    let v = res.headers().get(reqwest::header::ETAG)?.to_str().ok()?.trim();
+    let v = v.strip_prefix("W/").unwrap_or(v).trim_matches('"');
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+/// Whether an answer is still the file the download started from. Only a
+/// difference counts: a server that sends no ETag one time says nothing.
+fn same_file(expected_etag: Option<&str>, expected_total: Option<u64>, etag: Option<&str>, total: Option<u64>) -> bool {
+    let etag_ok = match (expected_etag, etag) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    let total_ok = match (expected_total, total) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    etag_ok && total_ok
+}
+
+/// Sleep for `secs`, waking early when the download is paused or cancelled.
+/// False when it was.
+async fn wait_unless_stopped(flag: &AtomicU8, secs: u64) -> bool {
+    let until = Instant::now() + std::time::Duration::from_secs(secs);
+    while Instant::now() < until {
+        if flag.load(Ordering::SeqCst) != RUN {
+            return false;
+        }
+        tokio::time::sleep(STOP_POLL).await;
+    }
+    flag.load(Ordering::SeqCst) == RUN
+}
+
 const RUN: u8 = 0;
 const PAUSE: u8 = 1;
 const CANCEL: u8 = 2;
+/// Set by a connection that hit something the others cannot carry on past
+/// (the file changed, the server refused): stop them all now.
+const HALT: u8 = 3;
 
 pub struct Downloads {
     list: Mutex<Vec<Download>>,
@@ -351,6 +473,9 @@ fn set_status<R: Runtime>(app: &AppHandle<R>, id: &str, status: Status, error: O
         d.status = status;
         d.error = error;
         d.speed = 0;
+        if matches!(status, Status::Paused | Status::Failed | Status::Installed | Status::Canceled) {
+            d.notice = None;
+        }
         if matches!(status, Status::Installed | Status::Failed | Status::Canceled) {
             d.finished_at = Some(now());
         }
@@ -371,6 +496,12 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) {
         if matches!(d.status, Status::Queued | Status::Resolving | Status::Downloading | Status::Verifying | Status::Extracting) {
             d.status = Status::Paused;
             d.speed = 0;
+        }
+        d.notice = None;
+        // The ranges are only ever saved once their bytes are on the disk;
+        // `received` is the live count and can be ahead of them after a crash.
+        if !d.segments.is_empty() {
+            d.received = d.segments.iter().map(|s| s.done.min(s.len())).sum();
         }
     }
     if let Ok(mut l) = app.state::<Downloads>().list.lock() {
@@ -507,6 +638,27 @@ fn enqueue_item<R: Runtime>(
     release: Option<String>,
 ) {
     let state = app.state::<Downloads>();
+    // Download pressed again for a file whose download stopped part way (its
+    // link ran out, or it failed): carry that one on with the fresh link
+    // instead of starting a second from zero. Every range is checked against
+    // the file it started from, so a different build under the same name
+    // simply starts over.
+    if mirror.is_none() {
+        if let Some(found) = unfinished_copy(&state, &url, slug.as_deref()) {
+            edit(app, &found, |d| {
+                d.url = url.clone();
+                d.error = None;
+                if release.is_some() {
+                    d.release = release.clone();
+                }
+            });
+            persist(app);
+            let _ = app.emit("notify", Notice::new("Picking up where it left off", "That download carries on from where it stopped.", None));
+            let _ = app.emit("download-started", found.clone());
+            let _ = requeue(app, &found);
+            return;
+        }
+    }
     // The same page's Download pressed twice while the first is still going.
     if let Ok(list) = state.list.lock() {
         if list.iter().any(|d| {
@@ -548,6 +700,20 @@ fn enqueue_item<R: Runtime>(
     emit(app, true);
     let _ = app.emit("download-started", id.clone());
     start(app.clone(), id);
+}
+
+/// A paused or failed download of the same file as `url` (our own, from the
+/// same game page), with bytes on disk worth keeping.
+fn unfinished_copy(state: &Downloads, url: &str, slug: Option<&str>) -> Option<String> {
+    let name = safe_name(&file_name_in_link(url)?);
+    let running = state.controls.lock().ok()?.keys().cloned().collect::<Vec<_>>();
+    let list = state.list.lock().ok()?;
+    list.iter()
+        .filter(|d| matches!(d.status, Status::Paused | Status::Failed) && !running.contains(&d.id))
+        .filter(|d| d.mirror.is_none() && d.received > 0 && !d.archive_path.is_empty())
+        .filter(|d| slug.is_none() || d.slug.as_deref() == slug)
+        .find(|d| d.file_name.eq_ignore_ascii_case(&name))
+        .map(|d| d.id.clone())
 }
 
 fn start<R: Runtime>(app: AppHandle<R>, id: String) {
@@ -751,12 +917,7 @@ pub fn safe_name(name: &str) -> String {
 
 async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Result<(), String> {
     let settings = crate::settings::load(app);
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
-        .tcp_nodelay(true)
-        .pool_max_idle_per_host(64)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = client_builder().build().map_err(|e| e.to_string())?;
 
     // Named before waiting for a free slot, so a queued download reads as its
     // game rather than as its slug until the ones ahead of it finish.
@@ -805,80 +966,175 @@ async fn run<R: Runtime>(app: &AppHandle<R>, id: &str, flag: &AtomicU8) -> Resul
     // Settings as they are now, not as they were when it was queued.
     let settings = crate::settings::load(app);
 
-    let already_complete = {
-        let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
-        !d.archive_path.is_empty() && d.total.is_some_and(|t| t > 0 && d.received >= t)
-    };
-    if !already_complete {
-        let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
-        let (mut client, mut connections) = (client.clone(), settings.connections);
-        // Our own link: connect over the address family it was bound to.
-        if !is_mirror {
-            let family = edit(app, id, |_| {}).and_then(|d| link_family(&d.url));
-            if let Some(local) = family {
-                if let Ok(bound) = reqwest::Client::builder()
-                    .user_agent(concat!("KryotoDesktop/", env!("CARGO_PKG_VERSION")))
-                    .tcp_nodelay(true)
-                    .pool_max_idle_per_host(64)
-                    .local_address(local)
-                    .build()
-                {
-                    client = bound;
-                }
-            }
+    let is_mirror = edit(app, id, |_| {}).is_some_and(|d| d.mirror.is_some());
+    let (mut client, mut connections) = (client.clone(), settings.connections);
+    // Our own link: connect over the address family it was bound to, and keep
+    // the resume pass dl.kryo.to hands out with the first range, so a range
+    // retried from another network after a drop is not refused.
+    if !is_mirror {
+        let family = edit(app, id, |_| {}).and_then(|d| link_family(&d.url));
+        let mut builder = client_builder().cookie_store(true);
+        if let Some(local) = family {
+            builder = builder.local_address(local);
         }
-        if is_mirror {
-            match mirror_client(app, id, flag, false, settings.connections).await {
-                Ok(v) => (client, connections) = v,
-                Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
-                Err(e) => return Err(e),
-            }
-        }
-        set_status(app, id, Status::Downloading, None);
-        let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
-        let mut attempt = 0;
-        let mut asked_again = false;
-        loop {
-            let step = if connections > 1 {
-                transfer_parallel(app, id, flag, &client, &settings.library_dir, connections, &limiter).await
-            } else {
-                transfer(app, id, flag, &client, &settings.library_dir).await
-            };
-            match step {
-                Ok(true) => break,
-                Ok(false) => return settle_stopped(app, id, flag),
-                Err(Transfer::Fatal(e)) => return Err(e),
-                // A mirror's address ran out (they are signed, or tied to a
-                // session): ask the mirror again, once per run.
-                Err(Transfer::Refused(_)) if is_mirror && !asked_again => {
-                    asked_again = true;
-                    match mirror_client(app, id, flag, true, settings.connections).await {
-                        Ok(v) => (client, connections) = v,
-                        Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
-                        Err(e) => return Err(e),
-                    }
-                    set_status(app, id, Status::Downloading, None);
-                }
-                Err(Transfer::Refused(code)) => return Err(refused_text(code, is_mirror)),
-                Err(Transfer::Retry(e)) => {
-                    attempt += 1;
-                    if attempt > 4 {
-                        return Err(format!("The connection kept dropping ({e}). Resume to try again."));
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt)).await;
-                    if flag.load(Ordering::SeqCst) != RUN {
-                        return settle_stopped(app, id, flag);
-                    }
-                }
-            }
+        if let Ok(ours) = builder.build() {
+            client = ours;
         }
     }
-    identify(app, id, &client).await;
-    verify(app, id).await?;
+    let mut resolved = false;
+    // Set once a mismatched archive has been fetched again, so a hash that is
+    // wrong on kryo.to's side costs one more download, not an endless loop.
+    let mut fetched_again = false;
+    loop {
+        let already_complete = {
+            let d = edit(app, id, |_| {}).ok_or("The download is gone.")?;
+            !d.archive_path.is_empty()
+                && d.total.is_some_and(|t| t > 0 && d.received >= t)
+                && d.segments.iter().all(|s| s.done >= s.len())
+        };
+        if !already_complete {
+            if is_mirror && !resolved {
+                match mirror_client(app, id, flag, false, settings.connections).await {
+                    Ok(v) => (client, connections) = v,
+                    Err(_) if flag.load(Ordering::SeqCst) != RUN => return settle_stopped(app, id, flag),
+                    Err(e) => return Err(e),
+                }
+                resolved = true;
+            }
+            set_status(app, id, Status::Downloading, None);
+            let limiter = Arc::new(Limiter::new(settings.speed_limit_mb));
+            match fetch_all(app, id, flag, &mut client, &mut connections, &settings, &limiter, is_mirror).await? {
+                true => {}
+                false => return settle_stopped(app, id, flag),
+            }
+        }
+        identify(app, id, &client).await;
+        match verify(app, id).await {
+            Ok(()) => break,
+            // A damaged download is usually one bad stretch of a long
+            // transfer. Fetch it again once by itself before asking the player.
+            Err(e) if !fetched_again && flag.load(Ordering::SeqCst) == RUN => {
+                fetched_again = true;
+                crate::logging::warn("download", &format!("{id}: {e}; fetching it again"));
+                edit(app, id, |d| d.notice = Some("The archive did not match kryo.to's checksum. Downloading it again.".into()));
+                emit(app, true);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    edit(app, id, |d| d.notice = None);
     if edit(app, id, |_| {}).and_then(|d| d.addon).is_some() {
         return crate::addons::install(app, id, &settings).await;
     }
     install(app, id, &settings).await
+}
+
+/// Fetch every byte of the archive, riding out dropped connections.
+/// `Ok(true)` when it is all on disk, `Ok(false)` when paused or cancelled.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_all<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    flag: &AtomicU8,
+    client: &mut reqwest::Client,
+    connections: &mut u32,
+    settings: &crate::settings::Settings,
+    limiter: &Arc<Limiter>,
+    is_mirror: bool,
+) -> Result<bool, String> {
+    let mut failures = 0u32;
+    let mut restarts = 0u32;
+    let mut asked_again = false;
+    // Once a server has answered a range with the whole file, it gets one
+    // stream for the rest of this run.
+    let mut one_stream = false;
+    loop {
+        let before = edit(app, id, |_| {}).map(|d| d.received).unwrap_or(0);
+        // Always the ranged path, whatever the connection count: a download
+        // started on ranges must resume on them. Resuming one on a single
+        // stream read the full-size file it had made as "already there" and
+        // installed an archive with holes in it.
+        let step = if one_stream {
+            transfer(app, id, flag, client, &settings.library_dir).await
+        } else {
+            transfer_parallel(app, id, flag, client, &settings.library_dir, *connections, limiter).await
+        };
+        match step {
+            Ok(true) => {
+                edit(app, id, |d| d.notice = None);
+                return Ok(true);
+            }
+            Ok(false) => {
+                edit(app, id, |d| d.notice = None);
+                return Ok(false);
+            }
+            Err(Transfer::Fatal(e)) => return Err(e),
+            // A mirror's address ran out (they are signed, or tied to a
+            // session): ask the mirror again, once per run.
+            Err(Transfer::Refused(_)) if is_mirror && !asked_again => {
+                asked_again = true;
+                match mirror_client(app, id, flag, true, settings.connections).await {
+                    Ok(v) => (*client, *connections) = v,
+                    Err(_) if flag.load(Ordering::SeqCst) != RUN => return Ok(false),
+                    Err(e) => return Err(e),
+                }
+                set_status(app, id, Status::Downloading, None);
+            }
+            Err(Transfer::Refused(code)) => return Err(refused_text(code, is_mirror)),
+            Err(Transfer::Restart(why)) => {
+                restarts += 1;
+                crate::logging::warn("download", &format!("{id}: starting over: {why}"));
+                if restarts > 2 {
+                    return Err(format!("The file kept changing while it downloaded ({why}). Press Retry to start it again."));
+                }
+                discard(app, id);
+            }
+            Err(Transfer::NoRanges) => {
+                crate::logging::warn("download", &format!("{id}: the server stopped answering ranges; one stream from here"));
+                one_stream = true;
+                discard(app, id);
+            }
+            Err(Transfer::Retry(e)) => {
+                let after = edit(app, id, |_| {}).map(|d| d.received).unwrap_or(0);
+                if after > before {
+                    failures = 0;
+                }
+                failures += 1;
+                if failures > MAX_FAILURES {
+                    return Err(format!("The connection kept dropping ({e}). Resume to try again."));
+                }
+                let wait = backoff(failures);
+                crate::logging::warn("download", &format!("{id}: {e}; trying again in {wait} s"));
+                edit(app, id, |d| {
+                    d.speed = 0;
+                    d.notice = Some(format!("Connection lost. Trying again in {wait} s."));
+                });
+                emit(app, true);
+                if !wait_unless_stopped(flag, wait).await {
+                    edit(app, id, |d| d.notice = None);
+                    return Ok(false);
+                }
+                edit(app, id, |d| d.notice = Some("Reconnecting.".into()));
+                emit(app, true);
+            }
+        }
+    }
+}
+
+/// Throw away what was fetched so far, so the next try starts from zero.
+fn discard<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    if let Some(d) = edit(app, id, |_| {}) {
+        if !d.archive_path.is_empty() {
+            let _ = std::fs::remove_file(&d.archive_path);
+        }
+    }
+    edit(app, id, |d| {
+        d.received = 0;
+        d.segments.clear();
+        d.etag = None;
+        d.verified = false;
+    });
+    persist(app);
 }
 
 /// What kryo.to says about this exact file: its SHA-256, and whether it is
@@ -1165,13 +1421,21 @@ enum Transfer {
     /// The server turned the address down (403, 410): it expired, or is
     /// bound to something this request is not.
     Refused(u16),
+    /// What arrived is not the file this download started from: another
+    /// length, another ETag, or a range that does not start where it was
+    /// asked to. Start over rather than stitch two files into one archive.
+    Restart(String),
+    /// The server answered a range with the whole file: carry on in one stream.
+    NoRanges,
 }
 
 /// What a refused address means, for the person.
 fn refused_text(code: u16, mirror: bool) -> String {
     match (mirror, code) {
         (true, _) => format!("The mirror refused the download twice (it answered {code}). Try another mirror, or our own copy."),
-        (false, 410) => "The download link expired. Open the game in the Store and press Download again.".into(),
+        (false, 410) => {
+            "The download link expired. Press Download on the game's Store page again: it carries on from where it stopped.".into()
+        }
         (false, _) => {
             "kryo.to refused the link - it only works on the network it was made for. Press Download again in the Store.".into()
         }
@@ -1224,6 +1488,7 @@ async fn mirror_client<R: Runtime>(
                 d.segments.clear();
                 d.received = 0;
                 d.total = Some(size);
+                d.etag = None;
             }
         }
     });
@@ -1234,17 +1499,15 @@ async fn mirror_client<R: Runtime>(
             headers.insert(k, v);
         }
     }
-    let client = reqwest::Client::builder()
+    let client = client_builder()
         .user_agent(crate::resolvers::UA)
         .default_headers(headers)
-        .tcp_nodelay(true)
-        .pool_max_idle_per_host(64)
         .build()
         .map_err(|e| e.to_string())?;
     Ok((client, connections.min(resolved.connections.max(1))))
 }
 
-/// Move bytes. `Ok(true)` finished, `Ok(false)` paused or cancelled.
+/// Move bytes on one stream. `Ok(true)` finished, `Ok(false)` paused or cancelled.
 async fn transfer<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
@@ -1253,32 +1516,46 @@ async fn transfer<R: Runtime>(
     library_dir: &str,
 ) -> Result<bool, Transfer> {
     let item = edit(app, id, |_| {}).ok_or(Transfer::Fatal("The download is gone.".into()))?;
-    let on_disk = if item.archive_path.is_empty() {
+    let mut on_disk = if item.archive_path.is_empty() {
         0
     } else {
         std::fs::metadata(&item.archive_path).map(|m| m.len()).unwrap_or(0)
     };
+    // Longer than the file can be is not a partial download of it.
+    if item.total.is_some_and(|t| on_disk > t) {
+        on_disk = 0;
+    }
     let mut request = client.get(&item.url);
     if on_disk > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={on_disk}-"));
     }
-    let response = request.send().await.map_err(|e| Transfer::Retry(e.to_string()))?;
+    let response = send(request).await?;
     let status = response.status();
     if status.as_u16() == 416 && on_disk > 0 {
-        return Ok(true);
+        // Nothing left past what is here: done, if what is here is the whole
+        // file. Taking any 416 as "done" is how a file the size of the
+        // download, with nothing in it, was once installed.
+        let total = content_range_of(&response).and_then(|r| r.total).or(item.total);
+        if total == Some(on_disk) {
+            return Ok(true);
+        }
+        return Err(Transfer::Restart(format!("the server has {total:?} bytes and {on_disk} are here")));
     }
     check_status(status.as_u16())?;
     let resumed = status.as_u16() == 206;
-    let total = if resumed {
-        response
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.rsplit('/').next())
-            .and_then(|v| v.parse::<u64>().ok())
-    } else {
-        response.content_length()
-    };
+    let range = content_range_of(&response);
+    let etag = etag_of(&response);
+    if resumed {
+        // The bytes must pick up exactly where the file on disk ends, from
+        // the same file. Anything else would be appended in the wrong place.
+        if range.and_then(|r| r.start) != Some(on_disk) {
+            return Err(Transfer::Restart(format!("asked to resume at {on_disk}, the server sent {range:?}")));
+        }
+        if !same_file(item.etag.as_deref(), item.total, etag.as_deref(), range.and_then(|r| r.total)) {
+            return Err(Transfer::Restart("the file on the server changed".into()));
+        }
+    }
+    let total = if resumed { range.and_then(|r| r.total) } else { response.content_length() };
 
     let mut path = PathBuf::from(&item.archive_path);
     if item.archive_path.is_empty() {
@@ -1304,14 +1581,18 @@ async fn transfer<R: Runtime>(
         });
     }
 
-    let mut file = tokio::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
-        .append(resumed)
         .truncate(!resumed)
         .open(&path)
         .await
         .map_err(|e| Transfer::Fatal(format!("Cannot write {}: {e}", path.display())))?;
+    let mut file = tokio::io::BufWriter::with_capacity(WRITE_BUFFER, file);
+    if resumed {
+        // At the end of what was asked for, not at whatever the end is now.
+        file.seek(std::io::SeekFrom::Start(on_disk)).await.map_err(|e| Transfer::Fatal(e.to_string()))?;
+    }
     let mut received = if resumed { on_disk } else { 0 };
     // Room for the rest of the archive, and for about as much again unpacked.
     // The exact unpacked size is checked again before extracting.
@@ -1322,35 +1603,40 @@ async fn transfer<R: Runtime>(
     edit(app, id, |d| {
         d.received = received;
         d.total = total.or(d.total);
+        d.segments.clear();
+        if !resumed {
+            d.etag = etag.clone();
+            d.verified = false;
+        }
     });
 
     let mut stream = response.bytes_stream();
     let mut window_start = Instant::now();
     let mut window_bytes = 0u64;
     let mut last_persist = Instant::now();
+    let mut last_data = Instant::now();
+    let mut failure = None;
     loop {
         // Waiting on the next chunk is bounded, so Pause and Cancel answer
         // within a moment even on a connection that has gone quiet.
         let next = tokio::time::timeout(STOP_POLL, stream.next()).await;
         if flag.load(Ordering::SeqCst) != RUN {
-            let _ = file.flush().await;
-            edit(app, id, |d| d.received = received);
-            return Ok(false);
+            break;
         }
         let chunk = match next {
+            Err(_) if last_data.elapsed() >= STALL_TIMEOUT => {
+                failure = Some(format!("no data for {} s", STALL_TIMEOUT.as_secs()));
+                break;
+            }
             Err(_) => continue,
             Ok(None) => break,
-            Ok(Some(chunk)) => chunk,
-        };
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = file.flush().await;
-                let _ = file.sync_all().await;
-                edit(app, id, |d| d.received = received);
-                return Err(Transfer::Retry(e.to_string()));
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(e))) => {
+                failure = Some(e.to_string());
+                break;
             }
         };
+        last_data = Instant::now();
         file.write_all(&chunk)
             .await
             .map_err(|e| Transfer::Fatal(format!("Writing the download failed: {e}")))?;
@@ -1364,6 +1650,7 @@ async fn transfer<R: Runtime>(
             edit(app, id, |d| {
                 d.received = received;
                 d.speed = if d.speed == 0 { speed } else { (d.speed + speed) / 2 };
+                d.notice = None;
             });
             emit(app, false);
         }
@@ -1372,11 +1659,20 @@ async fn transfer<R: Runtime>(
             last_persist = Instant::now();
         }
     }
-    file.flush().await.map_err(|e| Transfer::Fatal(e.to_string()))?;
+    // On disk before it is counted: a resume starts from the file's length.
+    file.flush().await.map_err(|e| Transfer::Fatal(format!("Writing the download failed: {e}")))?;
+    let _ = file.get_ref().sync_data().await;
     edit(app, id, |d| {
         d.received = received;
         d.total = Some(d.total.unwrap_or(received).max(received));
     });
+    persist(app);
+    if flag.load(Ordering::SeqCst) != RUN {
+        return Ok(false);
+    }
+    if let Some(e) = failure {
+        return Err(Transfer::Retry(e));
+    }
     if total.is_some_and(|t| received < t) {
         return Err(Transfer::Retry("the connection closed early".into()));
     }
@@ -1388,6 +1684,7 @@ fn check_status(code: u16) -> Result<(), Transfer> {
     match code {
         200 | 206 => Ok(()),
         401 | 403 | 410 => Err(Transfer::Refused(code)),
+        408 | 429 => Err(Transfer::Retry(format!("the server answered {code}"))),
         s if s >= 500 => Err(Transfer::Retry(format!("the server answered {s}"))),
         s => Err(Transfer::Fatal(format!("The download failed: the server answered {s}."))),
     }
@@ -1406,29 +1703,22 @@ async fn transfer_parallel<R: Runtime>(
     limiter: &Arc<Limiter>,
 ) -> Result<bool, Transfer> {
     let mut item = edit(app, id, |_| {}).ok_or(Transfer::Fatal("The download is gone.".into()))?;
-    let resumable = !item.segments.is_empty() && !item.archive_path.is_empty() && Path::new(&item.archive_path).is_file();
+    let on_disk = Path::new(&item.archive_path).is_file();
+    // Started on one stream (the server had no ranges then): carry on there,
+    // rather than throw away what is on disk.
+    if item.segments.is_empty() && !item.archive_path.is_empty() && on_disk && item.received > 0 {
+        return transfer(app, id, flag, client, library_dir).await;
+    }
+    let resumable = !item.segments.is_empty() && !item.archive_path.is_empty() && on_disk;
     if !resumable {
-        let probe = client
-            .get(&item.url)
-            .header(reqwest::header::RANGE, "bytes=0-0")
-            .send()
-            .await
-            .map_err(|e| Transfer::Retry(e.to_string()))?;
+        let probe = send(client.get(&item.url).header(reqwest::header::RANGE, "bytes=0-0")).await?;
         check_status(probe.status().as_u16())?;
-        let total = (probe.status().as_u16() == 206)
-            .then(|| {
-                probe
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.rsplit('/').next())
-                    .and_then(|v| v.parse::<u64>().ok())
-            })
-            .flatten();
+        let total = (probe.status().as_u16() == 206).then(|| content_range_of(&probe).and_then(|r| r.total)).flatten();
         let Some(total) = total.filter(|t| *t > 0) else {
             drop(probe);
             return transfer(app, id, flag, client, library_dir).await;
         };
+        let etag = etag_of(&probe);
         let name = probe
             .headers()
             .get(reqwest::header::CONTENT_DISPOSITION)
@@ -1455,6 +1745,7 @@ async fn transfer_parallel<R: Runtime>(
             d.total = Some(total);
             d.received = 0;
             d.segments = segments;
+            d.etag = etag;
             d.verified = false;
         });
         persist(app);
@@ -1464,16 +1755,18 @@ async fn transfer_parallel<R: Runtime>(
     let path = PathBuf::from(&item.archive_path);
     let segments = Arc::new(item.segments.clone());
     let progress: Arc<Vec<AtomicU64>> = Arc::new(segments.iter().map(|s| AtomicU64::new(s.done.min(s.len()))).collect());
+    let expect = Arc::new(Expected { etag: item.etag.clone(), total: item.total });
     let stop = Arc::new(AtomicU8::new(RUN));
     // The unfinished ranges, handed out one at a time to whichever connection
-    // is free. A connection that fails stops taking more; the rest carry on,
-    // and the whole thing is retried from where each range got to.
+    // is free. A connection that drops tries its range again by itself a few
+    // times; only one that keeps failing stops taking more, and the whole
+    // thing is then retried from where each range got to.
     let queue: Arc<Vec<usize>> = Arc::new((0..segments.len()).filter(|&i| segments[i].done < segments[i].len()).collect());
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let workers = (connections.max(1) as usize).min(queue.len().max(1));
     let mut tasks = Vec::new();
     for _ in 0..workers {
-        let (client, url, path, progress, limiter, stop, segments, queue, next) = (
+        let (client, url, path, progress, limiter, stop, segments, queue, next, expect) = (
             client.clone(),
             item.url.clone(),
             path.clone(),
@@ -1483,6 +1776,7 @@ async fn transfer_parallel<R: Runtime>(
             segments.clone(),
             queue.clone(),
             next.clone(),
+            expect.clone(),
         );
         tasks.push(tokio::spawn(async move {
             loop {
@@ -1490,18 +1784,41 @@ async fn transfer_parallel<R: Runtime>(
                 if stop.load(Ordering::SeqCst) != RUN {
                     return Ok(());
                 }
-                fetch_range(&client, &url, &path, i, segments[i].clone(), &progress, &stop, &limiter).await?;
+                let mut tries = 0;
+                loop {
+                    let before = progress[i].load(Ordering::SeqCst);
+                    match fetch_range(&client, &url, &path, i, segments[i].clone(), &progress, &stop, &limiter, &expect).await {
+                        Ok(()) => break,
+                        Err(Transfer::Retry(e)) => {
+                            if progress[i].load(Ordering::SeqCst) > before {
+                                tries = 0;
+                            }
+                            tries += 1;
+                            if tries > RANGE_RETRIES || !wait_unless_stopped(&stop, 1u64 << tries).await {
+                                return Err(Transfer::Retry(e));
+                            }
+                        }
+                        Err(other) => {
+                            // Nothing the others fetch from here on can be used.
+                            stop.store(HALT, Ordering::SeqCst);
+                            return Err(other);
+                        }
+                    }
+                }
             }
         }));
     }
 
     let mut last_sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
     let mut tick = Instant::now();
-    let mut last_persist = Instant::now();
+    let mut last_checkpoint = Instant::now();
+    let mut saving: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         // Pause and cancel reach the connections through `stop`.
-        stop.store(flag.load(Ordering::SeqCst), Ordering::SeqCst);
+        if flag.load(Ordering::SeqCst) != RUN {
+            stop.store(flag.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
         if stop.load(Ordering::SeqCst) != RUN {
             // Give the connections a moment to stop on their own, then stop
             // the rest outright: one still waiting for a server to answer
@@ -1519,21 +1836,21 @@ async fn transfer_parallel<R: Runtime>(
         let sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
         let dt = tick.elapsed().as_secs_f64().max(0.001);
         let speed = (sum.saturating_sub(last_sum) as f64 / dt) as u64;
+        if sum > last_sum {
+            edit(app, id, |d| d.notice = None);
+        }
         last_sum = sum;
         tick = Instant::now();
         edit(app, id, |d| {
             d.received = sum;
             d.speed = if d.speed == 0 { speed } else { (d.speed * 2 + speed) / 3 };
-            for (i, s) in d.segments.iter_mut().enumerate() {
-                if let Some(p) = progress.get(i) {
-                    s.done = p.load(Ordering::SeqCst);
-                }
-            }
         });
         emit(app, false);
-        if last_persist.elapsed().as_secs() >= 5 {
-            persist(app);
-            last_persist = Instant::now();
+        // Saved in the background, so a slow disk never holds up the count.
+        if last_checkpoint.elapsed().as_secs() >= 5 && saving.as_ref().is_none_or(|t| t.is_finished()) {
+            let (app, id, path, progress) = (app.clone(), id.to_string(), path.clone(), progress.clone());
+            saving = Some(tokio::spawn(async move { checkpoint(&app, &id, &path, &progress).await }));
+            last_checkpoint = Instant::now();
         }
         if tasks.iter().all(|t| t.is_finished()) {
             break;
@@ -1542,27 +1859,34 @@ async fn transfer_parallel<R: Runtime>(
     let mut retry = None;
     let mut fatal = None;
     let mut refused = None;
+    let mut restart = None;
+    let mut no_ranges = false;
     for t in tasks {
         match t.await {
             Ok(Ok(())) => {}
             Ok(Err(Transfer::Retry(e))) => retry = Some(e),
             Ok(Err(Transfer::Fatal(e))) => fatal = Some(e),
             Ok(Err(Transfer::Refused(code))) => refused = Some(code),
+            Ok(Err(Transfer::Restart(e))) => restart = Some(e),
+            Ok(Err(Transfer::NoRanges)) => no_ranges = true,
+            Err(e) if e.is_cancelled() => {}
             Err(e) => retry = Some(e.to_string()),
         }
     }
+    if let Some(t) = saving {
+        let _ = t.await;
+    }
+    checkpoint(app, id, &path, &progress).await;
     let sum: u64 = progress.iter().map(|p| p.load(Ordering::SeqCst)).sum();
-    edit(app, id, |d| {
-        d.received = sum;
-        for (i, s) in d.segments.iter_mut().enumerate() {
-            if let Some(p) = progress.get(i) {
-                s.done = p.load(Ordering::SeqCst);
-            }
-        }
-    });
-    persist(app);
+    edit(app, id, |d| d.received = sum);
     if let Some(e) = fatal {
         return Err(Transfer::Fatal(e));
+    }
+    if let Some(e) = restart {
+        return Err(Transfer::Restart(e));
+    }
+    if no_ranges {
+        return Err(Transfer::NoRanges);
     }
     if let Some(code) = refused {
         return Err(Transfer::Refused(code));
@@ -1573,7 +1897,41 @@ async fn transfer_parallel<R: Runtime>(
     if let Some(e) = retry {
         return Err(Transfer::Retry(e));
     }
+    if progress.iter().zip(segments.iter()).any(|(p, s)| p.load(Ordering::SeqCst) < s.len()) {
+        return Err(Transfer::Retry("a range was left unfinished".into()));
+    }
     Ok(true)
+}
+
+/// What every range must agree with to be part of this download.
+struct Expected {
+    etag: Option<String>,
+    total: Option<u64>,
+}
+
+/// Save how far each range has got, counting only bytes that are on the disk.
+///
+/// The counts are read first, the file is synced, and only then are they
+/// saved. Saving the live counts, as this used to, could record bytes that
+/// were still in the system's write cache: a crash or power cut lost them,
+/// the resume skipped them, and the archive came out with stretches of zeros
+/// that only 7-Zip's checksum noticed.
+async fn checkpoint<R: Runtime>(app: &AppHandle<R>, id: &str, path: &Path, progress: &[AtomicU64]) {
+    let counts: Vec<u64> = progress.iter().map(|p| p.load(Ordering::SeqCst)).collect();
+    let file = path.to_path_buf();
+    let synced = tokio::task::spawn_blocking(move || std::fs::OpenOptions::new().write(true).open(file).and_then(|f| f.sync_data()))
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+    if !synced {
+        return;
+    }
+    edit(app, id, |d| {
+        for (s, n) in d.segments.iter_mut().zip(&counts) {
+            s.done = (*n).min(s.len());
+        }
+    });
+    persist(app);
 }
 
 /// One range, on one connection, written at its own offset. Progress is only
@@ -1588,21 +1946,27 @@ async fn fetch_range(
     progress: &[AtomicU64],
     stop: &AtomicU8,
     limiter: &Limiter,
+    expect: &Expected,
 ) -> Result<(), Transfer> {
     let done = progress[index].load(Ordering::SeqCst);
     if done >= seg.len() {
         return Ok(());
     }
     let from = seg.start + done;
-    let res = client
-        .get(url)
-        .header(reqwest::header::RANGE, format!("bytes={from}-{}", seg.end))
-        .send()
-        .await
-        .map_err(|e| Transfer::Retry(e.to_string()))?;
+    let res = send(client.get(url).header(reqwest::header::RANGE, format!("bytes={from}-{}", seg.end))).await?;
     check_status(res.status().as_u16())?;
     if res.status().as_u16() != 206 {
-        return Err(Transfer::Fatal("The server stopped answering ranged requests. Set Downloads to one connection and try again.".into()));
+        return Err(Transfer::NoRanges);
+    }
+    // Exactly the bytes asked for, of the same file. Writing whatever came
+    // back at the offset that was asked for is how a range of one file, or
+    // the wrong stretch of the right one, ended up inside an archive.
+    let range = content_range_of(&res);
+    if range.and_then(|r| r.start) != Some(from) || range.and_then(|r| r.end).is_some_and(|e| e > seg.end) {
+        return Err(Transfer::Restart(format!("asked for {from}-{}, the server sent {range:?}", seg.end)));
+    }
+    if !same_file(expect.etag.as_deref(), expect.total, etag_of(&res).as_deref(), range.and_then(|r| r.total)) {
+        return Err(Transfer::Restart("the file on the server changed".into()));
     }
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -1614,19 +1978,21 @@ async fn fetch_range(
     let mut written = done;
     let mut stream = res.bytes_stream();
     let mut failure = None;
+    let mut last_data = Instant::now();
     loop {
         let next = tokio::time::timeout(STOP_POLL, stream.next()).await;
         if stop.load(Ordering::SeqCst) != RUN {
             break;
         }
         let chunk = match next {
+            Err(_) if last_data.elapsed() >= STALL_TIMEOUT => {
+                failure = Some(format!("no data for {} s", STALL_TIMEOUT.as_secs()));
+                break;
+            }
             Err(_) => continue,
             Ok(None) => break,
-            Ok(Some(chunk)) => chunk,
-        };
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(e))) => {
                 failure = Some(e.to_string());
                 break;
             }
@@ -1637,6 +2003,7 @@ async fn fetch_range(
         }
         written += take as u64;
         limiter.take(take as u64).await;
+        last_data = Instant::now();
         if written >= seg.len() {
             break;
         }
@@ -1648,7 +2015,6 @@ async fn fetch_range(
         }
     }
     file.flush().await.map_err(|e| Transfer::Fatal(e.to_string()))?;
-    let _ = file.get_ref().sync_data().await;
     progress[index].store(written, Ordering::SeqCst);
     if let Some(e) = failure {
         return Err(Transfer::Retry(e));
@@ -1845,10 +2211,10 @@ fn safe_join(dest: &Path, name: &str) -> Option<PathBuf> {
 
 /// Unpack `archive` into `dest`, reporting uncompressed bytes as it goes.
 ///
-/// 7z archives are read in-process first. Forge packs with 7-Zip, which can use
-/// the BCJ2 filter that the Rust decoder does not implement; when it refuses,
-/// the system's libarchive (`tar`, which reads 7z with BCJ2 on Windows 10+ and
-/// on Linux) finishes the job without progress.
+/// Real 7-Zip does it when there is one (`seven_zip_tools`), with progress.
+/// Without it, a .7z is read in-process, and when that refuses (Forge packs
+/// with 7-Zip, which can use the BCJ2 filter the Rust decoder does not
+/// implement) the system's libarchive (`tar`) finishes the job without progress.
 ///
 /// Returns the files the unpacker reported as damaged (a CRC mismatch inside
 /// the archive). 7-Zip and libarchive still write every file when that
@@ -1861,17 +2227,141 @@ pub fn extract(archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>))
         .extension()
         .map(|e| e.to_string_lossy().eq_ignore_ascii_case("7z"))
         .unwrap_or(false);
+    // Real 7-Zip first. The built-in decoder is pure Rust, single-threaded and
+    // a few times slower than 7-Zip's own, so a big game took noticeably longer
+    // to unpack in Kryoto than by hand. 7-Zip also reads every filter (BCJ2,
+    // ARM64) and reports damaged files by name.
+    let mut errors = Vec::new();
+    for tool in seven_zip_tools(is_7z) {
+        match extract_with_7zip(&tool, archive, dest, progress) {
+            None => continue,
+            Some(Ok(damaged)) => return Ok(damaged),
+            Some(Err(e)) => errors.push(e),
+        }
+    }
     if is_7z {
         match extract_7z(archive, dest, progress) {
             Ok(()) => return Ok(Vec::new()),
-            Err(e) => {
-                progress(0, None);
-                return extract_with_tar(archive, dest).map_err(|t| format!("{e}; {t}"));
-            }
+            Err(e) => errors.push(e),
         }
     }
     progress(0, None);
-    extract_with_tar(archive, dest)
+    extract_with_tar(archive, dest).map_err(|t| {
+        errors.push(t);
+        errors.join("; ")
+    })
+}
+
+/// Where 7-Zip's console might be: an installed 7-Zip, then the standalone
+/// `7zr.exe` this client keeps (which reads only .7z), or on Linux whatever
+/// the distribution calls it. Missing ones are skipped when they fail to start.
+fn seven_zip_tools(is_7z: bool) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    let list = {
+        let mut list: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+            .iter()
+            .filter_map(|v| std::env::var(v).ok())
+            .map(|root| PathBuf::from(root).join(r"7-Zip\7z.exe"))
+            .filter(|p| p.is_file())
+            .collect();
+        // ProgramFiles and ProgramW6432 are usually the same folder.
+        list.dedup();
+        if is_7z {
+            if let Some(zr) = SEVEN_ZR.get().filter(|p| p.is_file()) {
+                list.push(zr.clone());
+            }
+        }
+        list
+    };
+    #[cfg(not(windows))]
+    let list = {
+        let _ = is_7z;
+        ["7zz", "7z", "7za"].iter().map(PathBuf::from).collect()
+    };
+    list
+}
+
+/// The percentage at the start of one of 7-Zip's progress lines
+/// (`" 42% 118 - Game\data.pak"`).
+pub fn seven_zip_percent(line: &str) -> Option<u64> {
+    let line = line.trim_start();
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 || !line[digits..].starts_with('%') {
+        return None;
+    }
+    line[..digits].parse().ok().filter(|p| *p <= 100)
+}
+
+/// Unpack with 7-Zip's console, following its progress. `None` when the tool
+/// is not there; otherwise what it reported damaged, or why it failed.
+fn extract_with_7zip(tool: &Path, archive: &Path, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Option<Result<Vec<String>, String>> {
+    use std::io::Read;
+    // The bar counts unpacked bytes when the archive says how many there are
+    // (a .7z's headers do), and the archive's own size otherwise.
+    let scale = unpacked_size(archive).or_else(|| std::fs::metadata(archive).ok().map(|m| m.len())).filter(|s| *s > 0);
+    let mut cmd = std::process::Command::new(tool);
+    // -bso0: no listing. -bsp1: progress on stdout. -bse2: errors on stderr.
+    cmd.arg("x").arg("-y").arg("-bso0").arg("-bsp1").arg("-bse2").arg(format!("-o{}", dest.display())).arg(archive);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(Err(format!("{}: {e}", tool.display()))),
+    };
+    let mut stderr = child.stderr.take()?;
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    progress(0, scale);
+    if let Some(mut out) = child.stdout.take() {
+        // Progress lines overwrite each other with backspaces, not newlines.
+        let mut buf = [0u8; 4096];
+        let mut line = Vec::new();
+        let mut last = Instant::now();
+        while let Ok(n) = out.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if matches!(b, b'\x08' | b'\r' | b'\n') {
+                    if let (Some(pct), Some(total)) = (seven_zip_percent(&String::from_utf8_lossy(&line)), scale) {
+                        if last.elapsed().as_millis() > 200 {
+                            progress(total * pct / 100, Some(total));
+                            last = Instant::now();
+                        }
+                    }
+                    line.clear();
+                } else {
+                    line.push(b);
+                }
+            }
+        }
+    }
+    let status = child.wait();
+    let errors = errors.join().unwrap_or_default();
+    match status {
+        Ok(s) if s.success() => {
+            if let Some(total) = scale {
+                progress(total, Some(total));
+            }
+            Some(Ok(Vec::new()))
+        }
+        Ok(_) => {
+            let wrote_something = std::fs::read_dir(dest).map(|mut d| d.next().is_some()).unwrap_or(false);
+            if let Some(damaged) = damaged_files(&errors).filter(|_| wrote_something) {
+                return Some(Ok(damaged));
+            }
+            Some(Err(format!("7-Zip: {}", errors.trim())))
+        }
+        Err(e) => Some(Err(format!("{}: {e}", tool.display()))),
+    }
 }
 
 /// The files an unpacker's error output says are damaged, when damage is ALL
@@ -1959,7 +2449,7 @@ static SEVEN_ZR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// Fetch 7-Zip's official standalone console once, into the app's data folder.
 /// Best effort: without it the unpack falls back to tar.exe as before.
 #[cfg(windows)]
-async fn ensure_7zr<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) async fn ensure_7zr<R: Runtime>(app: &AppHandle<R>) {
     if SEVEN_ZR.get().is_some() {
         return;
     }
@@ -1999,44 +2489,20 @@ async fn ensure_7zr<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn extract_with_tar(archive: &Path, dest: &Path) -> Result<Vec<String>, String> {
-    // 7-Zip first - an installed one, else the standalone this client keeps -
-    // and tar.exe last: it reads zip and rar, but not LZMA, which is most .7z.
+    // libarchive, after 7-Zip (`extract`) had its turn. Windows' tar.exe reads
+    // zip and rar, but not LZMA, which is most .7z. GNU tar cannot read 7z, so
+    // on Linux bsdtar comes first.
     #[cfg(windows)]
-    let candidates: Vec<(PathBuf, Vec<String>)> = {
+    let candidates: Vec<PathBuf> = {
         let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-        let mut list: Vec<(PathBuf, Vec<String>)> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
-            .iter()
-            .filter_map(|v| std::env::var(v).ok())
-            .map(|root| PathBuf::from(root).join(r"7-Zip\7z.exe"))
-            .filter(|p| p.is_file())
-            .map(|p| (p, vec!["7z".to_string()]))
-            .collect();
-        // ProgramFiles and ProgramW6432 are usually the same folder.
-        list.dedup_by(|a, b| a.0 == b.0);
-        if let Some(zr) = SEVEN_ZR.get().filter(|p| p.is_file()) {
-            list.push((zr.clone(), vec!["7z".to_string()]));
-        }
-        list.push((PathBuf::from(system).join(r"System32\tar.exe"), vec![]));
-        list
+        vec![PathBuf::from(system).join(r"System32\tar.exe")]
     };
-    // GNU tar cannot read 7z, so on Linux libarchive's bsdtar comes first,
-    // then 7-Zip under each of the names distributions give it.
     #[cfg(not(windows))]
-    let candidates: Vec<(PathBuf, Vec<String>)> = vec![
-        (PathBuf::from("bsdtar"), vec![]),
-        (PathBuf::from("7zz"), vec!["7z".into()]),
-        (PathBuf::from("7z"), vec!["7z".into()]),
-        (PathBuf::from("7za"), vec!["7z".into()]),
-        (PathBuf::from("tar"), vec![]),
-    ];
-    let mut last_error = String::from("no archive tool found (install bsdtar or 7-Zip)");
-    for (tool, style) in candidates {
+    let candidates: Vec<PathBuf> = vec![PathBuf::from("bsdtar"), PathBuf::from("tar")];
+    let mut last_error = String::from("no archive tool found (install 7-Zip or bsdtar)");
+    for tool in candidates {
         let mut cmd = std::process::Command::new(&tool);
-        if style.first().map(String::as_str) == Some("7z") {
-            cmd.arg("x").arg("-y").arg(format!("-o{}", dest.display())).arg(archive);
-        } else {
-            cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
-        }
+        cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -2045,16 +2511,7 @@ fn extract_with_tar(archive: &Path, dest: &Path) -> Result<Vec<String>, String> 
         match cmd.output() {
             Ok(out) if out.status.success() => return Ok(Vec::new()),
             Ok(out) => {
-                // 7-Zip prints its errors to stdout, libarchive to stderr.
-                let text = format!("{}\n{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
-                let errors: String = text
-                    .lines()
-                    .filter(|l| {
-                        let l = l.to_ascii_lowercase();
-                        style.is_empty() || l.contains("error") || l.contains("crc")
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let errors = format!("{}\n{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
                 let wrote_something = std::fs::read_dir(dest).map(|mut d| d.next().is_some()).unwrap_or(false);
                 if let Some(damaged) = damaged_files(&errors).filter(|_| wrote_something) {
                     return Ok(damaged);
@@ -2507,6 +2964,169 @@ mod tests {
         assert!(damage_warning(&["a.pck".into(), "b.pck".into()], true).unwrap().contains("a.pck and 1 more"));
     }
 
+    #[test]
+    fn seven_zip_progress_lines_are_read() {
+        assert_eq!(seven_zip_percent("  42% 118 - Game\\data.pak"), Some(42));
+        assert_eq!(seven_zip_percent("100%"), Some(100));
+        assert_eq!(seven_zip_percent("  7%"), Some(7));
+        assert_eq!(seven_zip_percent("Everything is Ok"), None);
+        assert_eq!(seven_zip_percent("120%"), None);
+        assert_eq!(seven_zip_percent(""), None);
+    }
+
+    /// Packs a small game with the system's 7-Zip and unpacks it through
+    /// `extract`, which hands it to that same 7-Zip. Skipped where there is none.
+    #[test]
+    fn seven_zip_unpacks_with_progress() {
+        let dir = scratch("7zip");
+        let src = dir.join("src").join("Game");
+        std::fs::create_dir_all(src.join("bin")).unwrap();
+        let data: Vec<u8> = (0..3_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        std::fs::write(src.join("bin").join("Game.exe"), &data).unwrap();
+        std::fs::write(src.join("readme.txt"), b"hi").unwrap();
+        let archive = dir.join("Game - Kryoto.7z");
+        let Some(tool) = seven_zip_tools(true).into_iter().find(|t| {
+            std::process::Command::new(t)
+                .current_dir(dir.join("src"))
+                .arg("a")
+                .arg(&archive)
+                .arg("Game")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        }) else {
+            eprintln!("no 7-Zip here; skipped");
+            return;
+        };
+        let out = dir.join("out");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let damaged = extract_with_7zip(&tool, &archive, &out, &|done, total| seen.borrow_mut().push((done, total))).unwrap().unwrap();
+        assert!(damaged.is_empty());
+        assert_eq!(std::fs::read(out.join("Game").join("bin").join("Game.exe")).unwrap(), data);
+        let total = data.len() as u64 + 2;
+        assert_eq!(seen.borrow().last(), Some(&(total, Some(total))));
+
+        // A byte flipped in the packed data: named as damaged, not a failure.
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let mid = bytes.len() / 3;
+        bytes[mid] ^= 0xff;
+        let broken = dir.join("broken.7z");
+        std::fs::write(&broken, bytes).unwrap();
+        let out = dir.join("out2");
+        match extract_with_7zip(&tool, &broken, &out, &|_, _| {}).unwrap() {
+            Ok(damaged) => assert!(!damaged.is_empty()),
+            Err(e) => assert!(e.contains("7-Zip"), "{e}"),
+        }
+    }
+
+    #[test]
+    fn content_ranges_are_read() {
+        assert_eq!(
+            parse_content_range("bytes 100-199/1000"),
+            Some(ContentRange { start: Some(100), end: Some(199), total: Some(1000) })
+        );
+        assert_eq!(parse_content_range("bytes */1000"), Some(ContentRange { start: None, end: None, total: Some(1000) }));
+        assert_eq!(parse_content_range("bytes 0-0/*"), Some(ContentRange { start: Some(0), end: Some(0), total: None }));
+        assert_eq!(parse_content_range("items 1-2/3"), None);
+        assert_eq!(parse_content_range("bytes x-2/3"), None);
+    }
+
+    #[test]
+    fn only_a_difference_says_the_file_changed() {
+        assert!(same_file(Some("a-3"), Some(10), Some("a-3"), Some(10)));
+        assert!(same_file(Some("a-3"), Some(10), None, None));
+        assert!(same_file(None, None, Some("b"), Some(11)));
+        assert!(!same_file(Some("a-3"), Some(10), Some("b-3"), Some(10)));
+        assert!(!same_file(Some("a-3"), Some(10), Some("a-3"), Some(11)));
+    }
+
+    #[test]
+    fn retries_back_off_to_a_minute() {
+        assert_eq!((1..=7).map(backoff).collect::<Vec<_>>(), vec![2, 4, 8, 16, 30, 60, 60]);
+    }
+
+    /// A one-file HTTP server whose answer to `bytes=a-z` is up to `answer`.
+    fn serve(rt: &tokio::runtime::Runtime, answer: fn(u64, u64) -> (String, Vec<u8>)) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else { return };
+                    tokio::spawn(async move {
+                        let mut req = Vec::new();
+                        let mut b = [0u8; 1024];
+                        while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            let Ok(n) = sock.read(&mut b).await else { return };
+                            if n == 0 {
+                                return;
+                            }
+                            req.extend_from_slice(&b[..n]);
+                        }
+                        let text = String::from_utf8_lossy(&req).to_string();
+                        let range = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(String::from)).unwrap();
+                        let (a, z) = range.trim().split_once('-').unwrap();
+                        let (head, body) = answer(a.parse().unwrap(), z.parse().unwrap());
+                        let _ = sock.write_all(format!("{head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await;
+                        let _ = sock.write_all(&body).await;
+                    });
+                }
+            });
+            format!("http://{addr}/file")
+        })
+    }
+
+    /// The test file: every byte is its own offset, so a byte in the wrong
+    /// place shows.
+    fn byte_at(i: u64) -> u8 {
+        (i % 251) as u8
+    }
+
+    fn fetch_one(rt: &tokio::runtime::Runtime, url: &str, name: &str, seg: Segment, total: u64) -> (Result<(), Transfer>, Vec<u8>) {
+        let path = scratch(name).join("file.bin");
+        std::fs::File::create(&path).unwrap().set_len(total).unwrap();
+        let progress = vec![AtomicU64::new(0)];
+        let (stop, limiter) = (AtomicU8::new(RUN), Limiter::new(0));
+        let expect = Expected { etag: Some("v1".into()), total: Some(total) };
+        let client = reqwest::Client::new();
+        let res = rt.block_on(fetch_range(&client, url, &path, 0, seg, &progress, &stop, &limiter, &expect));
+        (res, std::fs::read(&path).unwrap())
+    }
+
+    #[test]
+    fn a_range_lands_at_its_own_offset() {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let url = serve(&rt, |a, z| {
+            (format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{z}/1000\r\nETag: \"v1\""), (a..=z).map(byte_at).collect())
+        });
+        let (res, file) = fetch_one(&rt, &url, "range-ok", Segment { start: 300, end: 599, done: 0 }, 1000);
+        assert!(res.is_ok());
+        assert!((300..600).all(|i| file[i] == byte_at(i as u64)));
+        assert!(file[..300].iter().all(|b| *b == 0) && file[600..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn a_range_from_the_wrong_place_or_file_starts_over() {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        // Answers every range from the start of the file.
+        let shifted = serve(&rt, |a, z| {
+            (format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/1000\r\nETag: \"v1\"", z - a), (0..=z - a).map(byte_at).collect())
+        });
+        let (res, file) = fetch_one(&rt, &shifted, "range-shifted", Segment { start: 300, end: 599, done: 0 }, 1000);
+        assert!(matches!(res, Err(Transfer::Restart(_))));
+        assert!(file.iter().all(|b| *b == 0), "nothing written");
+
+        let replaced = serve(&rt, |a, z| {
+            (format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{z}/1000\r\nETag: \"v2\""), (a..=z).map(byte_at).collect())
+        });
+        let (res, _) = fetch_one(&rt, &replaced, "range-replaced", Segment { start: 300, end: 599, done: 0 }, 1000);
+        assert!(matches!(res, Err(Transfer::Restart(_))));
+
+        let whole = serve(&rt, |_, _| ("HTTP/1.1 200 OK".into(), (0..1000).map(byte_at).collect()));
+        let (res, _) = fetch_one(&rt, &whole, "range-whole", Segment { start: 300, end: 599, done: 0 }, 1000);
+        assert!(matches!(res, Err(Transfer::NoRanges)));
+    }
+
     /// Throughput of the range fetcher against a local server that sends as
     /// fast as it can: what the client itself costs, with no network in the
     /// way. `cargo test --release -- --ignored range_throughput --nocapture`
@@ -2572,7 +3192,8 @@ mod tests {
                         loop {
                             let i = next.fetch_add(1, Ordering::SeqCst);
                             let Some(seg) = segs.get(i) else { break };
-                            assert!(fetch_range(&client, &url, &path, i, seg.clone(), &progress, &stop, &limiter).await.is_ok());
+                            let expect = Expected { etag: None, total: Some(TOTAL) };
+                            assert!(fetch_range(&client, &url, &path, i, seg.clone(), &progress, &stop, &limiter, &expect).await.is_ok());
                         }
                     }));
                 }

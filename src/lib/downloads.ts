@@ -44,6 +44,10 @@ export type Download = {
   release?: string | null
   /** Place in the queue: lower goes first. */
   queueOrder?: number
+  /** The file's ETag when it started, so a resume can tell a replaced file. */
+  etag?: string | null
+  /** What it is waiting on right now ("Connection lost. Trying again in 8 s."). */
+  notice?: string | null
   meta: {
     title: string
     cover: string | null
@@ -127,7 +131,12 @@ export function formatBytes(n: number | null | undefined): string {
 
 export function formatEta(d: Download): string | null {
   if (d.status !== 'downloading' || !d.speed || !d.total) return null
-  const s = Math.max(0, (d.total - d.received) / d.speed)
+  return formatLeft((d.total - d.received) / d.speed)
+}
+
+/** Seconds still to go, said the way the Downloads page says it. */
+export function formatLeft(seconds: number): string {
+  const s = Math.max(0, seconds)
   if (s < 60) return `${Math.ceil(s)}s left`
   if (s < 3600) return `${Math.ceil(s / 60)} min left`
   return `${(s / 3600).toFixed(1)} h left`

@@ -20,6 +20,11 @@ export type Account = {
   room?: boolean
   /** Voice calls are rolled out to this account (kryo.to feature flag). */
   voice?: boolean
+  /**
+   * Their Kryos, the coin of kryo.to's Hatchery, when they have a wallet.
+   * Shown beside the account; a click opens the Hatchery (18+) in the Store.
+   */
+  kryos?: number | null
   /** Using the client without an account (see App). */
   guest?: boolean
 }
@@ -60,7 +65,7 @@ export function useAccount(): Account | null | undefined {
       ? isOnline()
         ? undefined
         : remembered()
-      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, chat: true, friends: true, groups: true, room: true },
+      : { username: 'mira', displayName: 'Mira', avatarUrl: null, appearance: null, kryos: 12480, chat: true, friends: true, groups: true, room: true },
   )
   useEffect(() => {
     let stop: (() => void) | undefined

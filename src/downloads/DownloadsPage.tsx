@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUpToLine, ChevronDown, ChevronUp, Download, HeartHandshake, Pause, Play, RotateCw, X } from 'lucide-react'
+import { ArrowUpToLine, ChevronDown, ChevronUp, Download, FolderOpen, HeartHandshake, Pause, Play, RotateCw, X } from 'lucide-react'
 import { AsciiBar, AsciiSpark, Busy, Button, Caption, IconButton, Label, Matrix, type MatrixState } from '@/ui'
-import { downloads as api, formatBytes, formatEta, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
+import { downloads as api, formatBytes, formatEta, formatLeft, isActive, isWorking, phaseOf, progressOf, type Download as Dl } from '@/lib/downloads'
 import { Art } from '@/library/Art'
-import { capsulesFor } from '@/lib/library'
+import { capsulesFor, library } from '@/lib/library'
 import { EmptyState } from '@/ui/EmptyState'
 import { INBOX } from '@/ui/ascii/scenes'
 
@@ -30,6 +30,7 @@ export function DownloadsPage({
     .filter((d) => d !== current && (isActive(d) || d.status === 'paused' || d.status === 'failed'))
     .sort((a, b) => (a.queueOrder || Number.MAX_SAFE_INTEGER) - (b.queueOrder || Number.MAX_SAFE_INTEGER) || a.addedAt - b.addedAt)
   const done = list.filter((d) => d.status === 'installed' || d.status === 'canceled')
+  const stopped = waiting.filter((d) => d.status === 'paused' || d.status === 'failed')
 
   if (list.length === 0) {
     return (
@@ -47,7 +48,22 @@ export function DownloadsPage({
       {current ? <Current d={current} /> : null}
       {waiting.length ? (
         <section className="grid gap-3">
-          <Label>Up next · {waiting.length}</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label>Up next · {waiting.length}</Label>
+            {/* Everything stopped, back in the queue in one press: after a
+                restart, or a night the connection kept dropping. */}
+            {stopped.length > 1 ? (
+              <Button
+                size="sm"
+                onClick={() => {
+                  for (const d of stopped) void api.resume(d.id).catch(() => {})
+                }}
+              >
+                <Download className="size-3" />
+                Resume all
+              </Button>
+            ) : null}
+          </div>
           {waiting.map((d, i) => (
             <Row key={d.id} d={d} onOpenGame={onOpenGame} queue={{ first: i === 0, last: i === waiting.length - 1 }} />
           ))}
@@ -155,6 +171,7 @@ function Current({ d }: { d: Dl }) {
   const { pending, run } = usePending(d)
   // Past the download: checking the hash, then unpacking.
   const extracting = d.status === 'extracting' || d.status === 'verifying'
+  const unpackRate = useRate(extracting ? d.extracted : null, `${d.id}:${d.status}`)
   const resolving = d.status === 'resolving'
   const fraction = resolving ? null : extracting ? (d.extractTotal ? d.extracted / d.extractTotal : null) : d.total ? d.received / d.total : null
   return (
@@ -193,10 +210,16 @@ function Current({ d }: { d: Dl }) {
         ) : null}
         <dl className={resolving ? 'hidden' : 'flex flex-wrap gap-8'}>
           {extracting ? (
-            <Stat
-              k={d.status === 'verifying' ? 'Checked' : 'Unpacked'}
-              v={`${formatBytes(d.extracted)}${d.extractTotal ? ` / ${formatBytes(d.extractTotal)}` : ''}`}
-            />
+            <>
+              <Stat
+                k={d.status === 'verifying' ? 'Checked' : 'Unpacked'}
+                v={`${formatBytes(d.extracted)}${d.extractTotal ? ` / ${formatBytes(d.extractTotal)}` : ''}`}
+              />
+              {unpackRate > 0 ? <Stat k="Speed" v={`${formatBytes(unpackRate)}/s`} /> : null}
+              {unpackRate > 0 && d.extractTotal ? (
+                <Stat k="Time left" v={formatLeft((d.extractTotal - d.extracted) / unpackRate)} />
+              ) : null}
+            </>
           ) : (
             <>
               <Stat k="Speed" v={`${formatBytes(d.speed)}/s`} />
@@ -205,6 +228,12 @@ function Current({ d }: { d: Dl }) {
             </>
           )}
         </dl>
+        {d.notice ? (
+          <p className="flex items-center gap-2 text-xs leading-relaxed text-muted-foreground" role="status">
+            <Busy className="size-3" />
+            {d.notice}
+          </p>
+        ) : null}
         {!extracting && !resolving ? <AsciiSpark samples={samples} width={56} /> : null}
       </div>
     </section>
@@ -267,6 +296,11 @@ function Row({
             </IconButton>
           </div>
         ) : null}
+        {d.status === 'installed' && d.installDir ? (
+          <IconButton label="Show folder" onClick={() => void library.openFolder(d.installDir!)}>
+            <FolderOpen className="size-3.5" />
+          </IconButton>
+        ) : null}
         {d.status === 'installed' && d.gameId ? (
           <Button variant="primary" size="sm" onClick={() => onOpenGame(d.gameId!)}>
             <Play className="size-3 fill-current" />
@@ -302,6 +336,38 @@ function Stat({ k, v }: { k: string; v: string }) {
       <dd className="m-0 text-sm tabular-nums text-foreground">{v}</dd>
     </div>
   )
+}
+
+/**
+ * Bytes a second a counter is moving at, smoothed over a few seconds. For
+ * unpacking and checking, whose speed the app does not report itself. `key`
+ * starts it over (a new download, or checking turning into unpacking).
+ */
+function useRate(value: number | null, key: string) {
+  const [rate, setRate] = useState(0)
+  const last = useRef<{ key: string; value: number; at: number } | null>(null)
+  useEffect(() => {
+    if (value === null) {
+      last.current = null
+      setRate(0)
+      return
+    }
+    const now = performance.now()
+    const prev = last.current
+    if (!prev || prev.key !== key || value < prev.value) {
+      last.current = { key, value, at: now }
+      setRate(0)
+      return
+    }
+    const dt = (now - prev.at) / 1000
+    // Updates come every ~200 ms; measuring over at least a second keeps the
+    // figure from jumping with each one.
+    if (dt < 1) return
+    const instant = (value - prev.value) / dt
+    setRate((r) => (r ? r * 0.6 + instant * 0.4 : instant))
+    last.current = { key, value, at: now }
+  }, [value, key])
+  return rate
 }
 
 /** The last minute or so of speed readings, for the graph. */
